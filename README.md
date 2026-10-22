@@ -1,5 +1,5 @@
-# glasses-filter-project-template
-Team: Coach Heying
+# IA Hallway Filter Project
+Team: Viraj Das, Aman Sreejesh, Ishan Prabhu, Aryan Mali
 
 ## How this repo works
 - **Issues** hold our user stories. Use the "User story" template.

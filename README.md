@@ -10,6 +10,7 @@ Team: Viraj Das, Aman Sreejesh, Ishan Prabhu, Aryan Mali
 ## Where code goes
 - **viraj/, aman/, ishan/, aryan/** each hold one team member's filter(s). Work only in your own folder.
 - **common/main.py** is the main system. It combines everyone's filters and implements the shared features (opt-in zone, fade-in, timer, multi-user, engagement).
+- Run everything with `python common/main.py`, or only your filter with `python common/main.py emoji`. See the top of `common/main.py` for how to plug in a filter.
 
 ## Labels to create
 - user: on purpose, user: passerby, user: maintainer, user: excluded

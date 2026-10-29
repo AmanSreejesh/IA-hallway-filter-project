@@ -7,6 +7,10 @@ Team: Viraj Das, Aman Sreejesh, Ishan Prabhu, Aryan Mali
 - **test-cases.md** holds tests that trace back to stories by issue number.
 - **prototype/** holds snapshots of our code when it passes a story's tests.
 
+## Where code goes
+- **viraj/, aman/, ishan/, aryan/** each hold one team member's filter(s). Work only in your own folder.
+- **common/main.py** is the main system. It combines everyone's filters and implements the shared features (opt-in zone, fade-in, timer, multi-user, engagement).
+
 ## Labels to create
 - user: on purpose, user: passerby, user: maintainer, user: excluded
 - priority: high, priority: medium, priority: low

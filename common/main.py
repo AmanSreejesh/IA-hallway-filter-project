@@ -6,7 +6,7 @@ Run from the repo root:
     python common/main.py              # every filter, taking turns
     python common/main.py emoji        # only the filters you name (for testing your own)
 
-Keys:  q = quit   n = next filter   d = debug view (distance + head angles, for calibrating)
+Keys:  q = quit   n = next filter   d = debug view (distance, head angles, FPS -- for calibrating)
 
 How a filter plugs in (see viraj/emoji_filter.py for an example):
   - Make a class with a `name`, an `apply(frame, face, opacity)` method that draws onto
@@ -21,6 +21,7 @@ import importlib
 import math
 import os
 import sys
+import threading
 import time
 import urllib.request
 from datetime import datetime, time as dtime
@@ -43,8 +44,23 @@ FILTERS = {
     # "clown_nose": ("aryan.clown_nose_filter", "ClownNoseFilter"),
 }
 
+# --- Feature toggles (True = on, False = off) ---
+USE_OPT_IN_ZONE = True    # only people closer than ZONE_ENTER_INCHES and fully on screen get a filter
+USE_WALK_BY_CHECK = True  # people walking past (faster than WALKING_SPEED) don't get a filter
+USE_ANGLE_LIMIT = False   # filter goes away when the head turns/tilts past MAX_ANGLE
+USE_FADE_IN = True        # wait DWELL_SECONDS, then fade in (off = filter appears/disappears instantly)
+USE_TIMER = True          # 1 minute note and 3 minute reminder
+USE_MULTI_USER = True     # everyone in view gets a filter (off = only the closest person)
+USE_ENGAGEMENT = True     # rotate between filters every FILTER_SWITCH_SECONDS ('n' still works when off)
+USE_SCHEDULE = False       # filters turn off at FILTERS_OFF_AT
+USE_HINT_TEXT = True      # "Step up close..." message when nobody is using a filter
+
 # --- Settings (keep in sync with constraints.md) ---
 CAMERA_SIZE = (640, 480)
+DETECT_SCALE = 0.5        # look for faces on a half-size copy of the frame (~4x less work on the Pi).
+                          # People in the opt-in zone are big on screen, so nothing is lost.
+NEW_FACE_EVERY = 3        # while someone's being tracked, scan the whole picture for new people every N frames
+SEARCH_ANGLES = (40, -40, 80, -80, 130, -130, 180)   # tilts tried when nobody is in view
 
 # Opt-in zone. Distance is estimated from how far apart the eyes look on screen.
 FOCAL_PX = 600            # camera focal length in pixels -- calibrate with the 'd' debug view
@@ -52,14 +68,21 @@ EYE_GAP_INCHES = 2.5      # average distance between a person's eyes
 ZONE_ENTER_INCHES = 30    # step closer than this to opt in
 ZONE_EXIT_INCHES = 33     # ...and you have to step back past this to opt out.
                           # The gap between the two stops flicker at the border.
+WALKING_SPEED = 2.0       # moving faster than this (face widths per second) = walking past, no filter
 MAX_ANGLE = 45            # turn/tilt your head past this and the filter goes away
 RETURN_ANGLE = 40         # ...and comes back once you're under this (same anti-flicker idea)
 
+# Smoothing. Still faces get smoothed a lot (no jitter); moving faces barely at all (no lag).
+STILL_SMOOTHING = 1.0     # lower = steadier when still, but more lag (try 0.5 to 2)
+MOVING_RESPONSE = 5.0     # higher = catches up faster when you move (try 2 to 10)
+
 # Fade-in: people walking past shouldn't get a filter slapped on them.
-DWELL_SECONDS = 1.0       # must stay opted in this long before anything shows
+DWELL_SECONDS = 0.5       # must stay in the zone this long before anything shows
+LEAVE_SECONDS = 0.3       # must be out of the zone this long before it fades away
+                          # (so one bad frame -- a blink, a missed detection -- can't flicker it)
 FADE_START = 0.1          # first visible opacity
-FADE_IN_SECONDS = 2.0     # time to go from FADE_START to fully visible
-FADE_OUT_SECONDS = 0.4
+FADE_IN_SECONDS = 0.4     # time to go from FADE_START to fully visible
+FADE_OUT_SECONDS = 0.3
 
 # Timer
 TIMER_GENTLE_SECONDS = 60     # small note that a minute has passed
@@ -74,7 +97,6 @@ LOST_GRACE_SECONDS = 0.5      # keep a person around this long if the detector m
 FILTER_SWITCH_SECONDS = 30    # rotate to the next filter this often
 
 # Schedule: filters turn off after dismissal so nobody heading to the buses gets stopped
-ENFORCE_SCHEDULE = True
 FILTERS_OFF_AT = dtime(16, 15)
 
 
@@ -88,20 +110,160 @@ def load_filters(names: list) -> list:
             continue
         module_name, class_name = FILTERS[name]
         try:
-            filters.append(getattr(importlib.import_module(module_name), class_name)())
-            print(f"Loaded filter: {name}")
+            f = getattr(importlib.import_module(module_name), class_name)()
         except Exception as e:
             print(f"Skipping filter '{name}': {e}")
+            continue
+        filters.append(f)
+        print(f"Loaded filter: {name}")
     return filters
 
 
-def load_model() -> None:
-    """Download the YuNet face model the first time the program runs."""
-    if os.path.exists(MODEL_PATH) and os.path.getsize(MODEL_PATH) > 100_000:
+def download(url: str, path: str) -> None:
+    """Download a model file the first time the program runs."""
+    if os.path.exists(path) and os.path.getsize(path) > 100_000:
         return
-    print("Downloading YuNet face model (one time only)...")
-    urllib.request.urlretrieve(MODEL_URL, MODEL_PATH)
+    print(f"Downloading {os.path.basename(path)} (one time only)...")
+    urllib.request.urlretrieve(url, path)
     print("Done.")
+
+
+# --- Face detector ---
+# detect() returns one row per face: [x, y, w, h, eye1 x,y, eye2 x,y, nose x,y, mouth1 x,y, mouth2 x,y, score]
+# YuNet always lists the points in the same order (eye, eye, nose, mouth corner, mouth corner),
+# even when the head is upside down, so the order tells us which way the face is pointing.
+class YuNetDetector:
+    def __init__(self):
+        download(MODEL_URL, MODEL_PATH)
+        self.net = cv2.FaceDetectorYN.create(MODEL_PATH, "", CAMERA_SIZE, score_threshold=0.8)
+        self.input_size = None
+        self.search_step = 0
+        self.frame_count = 0
+        self.prev_gray = None
+
+    def _detect(self, small: np.ndarray, center=None, angle: float = 0.0) -> list:
+        """Find faces in `small`, first turning the picture by `angle` degrees around `center`.
+
+        YuNet was trained on upright faces: on a tilted head its points stay level (at a 30
+        degree tilt it still reported the eyes as flat) and past ~40 degrees it loses the face.
+        Turning the picture so the face is upright, then turning the points back, fixes both.
+        """
+        size = (small.shape[1], small.shape[0])
+        if size != self.input_size:
+            self.net.setInputSize(size)
+            self.input_size = size
+        if angle == 0:
+            _, faces = self.net.detect(small)
+            return [] if faces is None else list(faces)
+        turn = cv2.getRotationMatrix2D(center, angle, 1.0)
+        _, faces = self.net.detect(cv2.warpAffine(small, turn, size))
+        if faces is None:
+            return []
+        back = cv2.invertAffineTransform(turn)
+        out = []
+        for f in faces:
+            pts = f[4:14].reshape(5, 2) @ back[:, :2].T + back[:, 2]
+            x, y, w, h = f[:4]
+            corners = np.array([[x, y], [x + w, y], [x, y + h], [x + w, y + h]]) @ back[:, :2].T + back[:, 2]
+            (x0, y0), (x1, y1) = corners.min(axis=0), corners.max(axis=0)
+            out.append(np.array([x0, y0, x1 - x0, y1 - y0, *pts.ravel(), f[14]], dtype=np.float32))
+        return out
+
+    def _tilt_change(self, gray: np.ndarray, center: tuple, radius: float) -> float:
+        """How many degrees the face around `center` rotated since last frame.
+
+        Follows dozens of small details on the face (optical flow) and measures how much
+        they turned together. Much more accurate for tilting than YuNet's points.
+        """
+        if self.prev_gray is None or self.prev_gray.shape != gray.shape:
+            return 0.0
+        mask = np.zeros_like(gray)
+        cv2.circle(mask, (int(center[0]), int(center[1])), int(radius), 255, -1)
+        old = cv2.goodFeaturesToTrack(self.prev_gray, 60, 0.01, 3, mask=mask)
+        if old is None or len(old) < 6:
+            return 0.0
+        new, ok, _ = cv2.calcOpticalFlowPyrLK(self.prev_gray, gray, old, None, winSize=(15, 15), maxLevel=2)
+        ok = ok.ravel() == 1
+        if ok.sum() < 6:
+            return 0.0
+        motion, _ = cv2.estimateAffinePartial2D(old[ok], new[ok], method=cv2.RANSAC, ransacReprojThreshold=2.0)
+        return 0.0 if motion is None else math.degrees(math.atan2(motion[1, 0], motion[0, 0]))
+
+    def detect(self, frame: np.ndarray, tracked: list = ()) -> list:
+        """Returns (row, tilt) per face. `tracked` = (nose, tilt, size) for each person from
+        last frame. Their new tilt is last tilt + how far the face rotated (optical flow), and
+        they're looked for in a copy of the picture turned so their face is upright.
+        For brand-new faces, tilt is None (main.py starts it from the eye line)."""
+        # Detect on a shrunken copy (the biggest speed-up on the Pi), then scale the points back up.
+        small = cv2.resize(frame, None, fx=DETECT_SCALE, fy=DETECT_SCALE, interpolation=cv2.INTER_AREA)
+        gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+        self.frame_count += 1
+        # Look over the whole picture for new people (every frame if nobody's here yet)
+        found = [(f, None) for f in self._detect(small)] if not tracked or self.frame_count % NEW_FACE_EVERY == 0 else []
+
+        for nose, tilt, size in tracked:
+            center = (float(nose[0] * DETECT_SCALE), float(nose[1] * DETECT_SCALE))
+            near = size * DETECT_SCALE * 2.5
+            tilt = wrap(tilt + self._tilt_change(gray, center, size * DETECT_SCALE * 1.6))
+            redo = [f for f in self._detect(small, center, tilt)
+                    if np.hypot(f[8] - center[0], f[9] - center[1]) < near]
+            # This person's upright-picture result (if any) is replaced by the straightened one
+            same = [f for f, _ in found if np.hypot(f[8] - center[0], f[9] - center[1]) < near]
+            found = [(f, t) for f, t in found if np.hypot(f[8] - center[0], f[9] - center[1]) >= near]
+            if redo or same:
+                found.append(((redo or same)[0], tilt))
+
+        # Nobody in view: also try one tilted angle per frame, to catch someone already tilting their head
+        if not found and not tracked:
+            angle = SEARCH_ANGLES[self.search_step % len(SEARCH_ANGLES)]
+            self.search_step += 1
+            found = [(f, None) for f in self._detect(small, (small.shape[1] / 2, small.shape[0] / 2), angle)]
+
+        self.prev_gray = gray
+        for f, _ in found:
+            f[:14] /= DETECT_SCALE
+        return found
+
+
+# --- Camera ---
+class Camera:
+    """Reads the camera on its own thread and keeps only the newest frame.
+
+    Without this, a slow Pi falls behind and the camera's queue hands it frames from a
+    moment ago, so the filter looks like it's lagging behind your face.
+    """
+
+    def __init__(self):
+        backend = cv2.CAP_DSHOW if sys.platform.startswith("win") else cv2.CAP_ANY
+        self.cap = cv2.VideoCapture(0, backend)
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_SIZE[0])
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_SIZE[1])
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        self.frame = None
+        self.new_frame = threading.Event()
+        self.running = self.cap.isOpened()
+        self.thread = threading.Thread(target=self._loop, daemon=True)
+        if self.running:
+            self.thread.start()
+
+    def _loop(self):
+        while self.running:
+            ok, frame = self.cap.read()
+            self.frame = frame if ok else None
+            self.running = ok
+            self.new_frame.set()
+
+    def read(self):
+        """Wait for a frame we haven't seen yet. Returns None if the camera stopped."""
+        self.new_frame.wait(2.0)
+        self.new_frame.clear()
+        return self.frame
+
+    def release(self):
+        self.running = False
+        if self.thread.is_alive():
+            self.thread.join(1.0)
+        self.cap.release()
 
 
 # --- Face data handed to every filter ---
@@ -110,10 +272,10 @@ class Face:
 
     id                       stays the same while the person is in view
     box                      (x, y, w, h)
-    left_eye, right_eye, nose, mouth_left, mouth_right   (x, y) points, left = left on screen
+    left_eye, right_eye, nose, mouth_left, mouth_right   (x, y) points (left = left on screen when upright)
     size                     face size in pixels (about the eye gap, but steady when you turn)
-    roll                     head tilt in degrees (ear toward shoulder)
-    yaw                      head turn left/right in degrees (0 = facing the camera)
+    roll                     head tilt in degrees, -180 to 180 (ear toward shoulder; 180 = upside down)
+    yaw                      head turn left/right in degrees (0 = facing the camera, positive = turned toward screen right)
     pitch                    head nod up/down in degrees (positive = looking down)
     distance                 estimated inches from the camera
     """
@@ -124,10 +286,16 @@ class Face:
         self.size = 0.0
         self.roll = self.yaw = self.pitch = 0.0
         self.distance = 999.0
+        self.speed = 0.0        # face widths per second
         # system state (filters don't need these)
+        self.point_filter = Smoother()
+        self.angle_filter = Smoother()
+        self.size_filter = Smoother()
+        self.pose_guess = None  # last 3D head pose, used as the starting point for the next frame
+        self.tilt = None        # how far the head is tilted in the picture, tracked by optical flow
         self.last_seen = 0.0
         self.opted_in = False
-        self.dwell_start = None
+        self.change_start = None
         self.opacity = 0.0
         self.session_start = None
         self.last_eligible = 0.0
@@ -140,72 +308,137 @@ class Face:
     mouth_right = property(lambda self: tuple(self.points[6]))
 
 
-# --- Head pose + smoothing ---
-def raw_points(det: np.ndarray) -> np.ndarray:
-    """YuNet row -> 7x2 points, with eyes and mouth corners sorted left/right on screen."""
-    # Row: [x, y, w, h, eye1, eye2, nose, mouth1, mouth2 (x, y each), score]
-    eyes = sorted([det[4:6], det[6:8]], key=lambda p: p[0])
-    mouth = sorted([det[10:12], det[12:14]], key=lambda p: p[0])
-    return np.array([det[0:2], det[2:4], *eyes, det[8:10], *mouth], dtype=np.float32)
-
-
-def head_pose(p: np.ndarray) -> tuple:
-    """Return (roll, yaw, pitch, size) from smoothed points."""
-    left_eye, right_eye, nose = p[2], p[3], p[4]
-    eye_vec = right_eye - left_eye
-    eye_dist = max(float(np.hypot(*eye_vec)), 1.0)
-    eye_mid = (left_eye + right_eye) / 2
-    mouth_mid = (p[5] + p[6]) / 2
-
-    roll = math.degrees(math.atan2(eye_vec[1], eye_vec[0]))
-
-    # Yaw: when you turn, the nose slides toward one eye. Measured along the eye line
-    # so tilting doesn't fool it. 0.5 is roughly how far the nose sticks out compared to the eye gap.
-    turn = float(np.dot(nose - eye_mid, eye_vec)) / (eye_dist * eye_dist)
-    yaw = math.degrees(math.atan(turn / 0.5))
-
-    # Pitch: when you nod, the nose slides toward your eyes or your mouth.
-    # The nose normally sits ~55% of the way from eye line to mouth (tune if needed).
-    down_vec = mouth_mid - eye_mid
-    down_len = max(float(np.hypot(*down_vec)), 1.0)
-    along = float(np.dot(nose - eye_mid, down_vec)) / (down_len * down_len)
-    pitch = math.degrees(math.atan((along - 0.55) / 0.5))
-
-    # Size: the eye gap shrinks when you turn and the eye-to-mouth gap shrinks when you nod,
-    # so undo each one and average them. This was the main cause of the emoji jitter.
-    cos_yaw = max(math.cos(math.radians(yaw)), 0.5)
-    cos_pitch = max(math.cos(math.radians(pitch)), 0.5)
-    size = (eye_dist / cos_yaw + down_len / cos_pitch) / 2
-    return roll, yaw, pitch, size
-
-
+# --- Smoothing ---
 def smooth(old, new, amount: float):
     """Blend toward the new value. amount = how much of the new value to take (0..1)."""
     return new if old is None else old + (new - old) * amount
 
 
-def update_face(face: Face, det: np.ndarray, now: float) -> None:
-    pts = raw_points(det)
-    # Move fast when the person moves a lot (no lag), smooth heavily when they're still (no jitter)
-    jump = 0.0 if face.points is None else float(np.abs(pts[4] - face.points[4]).max())
-    amount = 0.8 if jump > max(face.size, 1.0) * 0.3 else 0.4
-    face.points = smooth(face.points, pts, amount)
+class Smoother:
+    """Smooths a value a lot while it's still and hardly at all while it's moving.
 
-    roll, yaw, pitch, size = head_pose(face.points)
-    first = face.size == 0.0
-    face.roll = roll if first else smooth(face.roll, roll, 0.4)
-    face.yaw = yaw if first else smooth(face.yaw, yaw, 0.4)
-    face.pitch = pitch if first else smooth(face.pitch, pitch, 0.4)
-    face.size = size if first else smooth(face.size, size, 0.15)
+    A fixed amount of smoothing always lags behind (the old problem). This is the
+    "One Euro filter": it measures how fast the value is changing and loosens up to match.
+    """
+
+    def __init__(self):
+        self.value = None
+        self.velocity = None
+
+    @staticmethod
+    def _amount(dt: float, cutoff):
+        return 1 / (1 + 1 / (2 * math.pi * cutoff * dt))
+
+    def __call__(self, new, dt: float, scale: float = 1.0):
+        new = np.asarray(new, dtype=np.float64)
+        if self.value is None or dt <= 0:
+            self.value, self.velocity = new, np.zeros_like(new)
+            return self.value
+        self.velocity = smooth(self.velocity, (new - self.value) / dt, self._amount(dt, 1.0))
+        # scale makes "fast" mean the same thing whether you're near the camera or far away
+        cutoff = STILL_SMOOTHING + MOVING_RESPONSE * np.abs(self.velocity) / scale
+        self.value = smooth(self.value, new, self._amount(dt, cutoff))
+        return self.value
+
+
+# --- Head pose ---
+# Rough 3D positions (mm) of the 5 face points on an average head, with the nose tip at 0.
+# Axes match OpenCV's camera: x = right, y = down, z = away from the camera.
+FACE_MODEL = np.array([
+    [-31.5, -42.0, 27.0],   # eye (left on screen)
+    [31.5, -42.0, 27.0],    # eye (right on screen)
+    [0.0, 0.0, 0.0],        # nose tip
+    [-25.0, 38.0, 18.0],    # mouth corner (left on screen)
+    [25.0, 38.0, 18.0],     # mouth corner (right on screen)
+])
+
+
+def raw_points(det: np.ndarray) -> np.ndarray:
+    """YuNet row -> 7x2 points: box corner, box size, eye, eye, nose, mouth corner, mouth corner.
+    Kept in YuNet's order (not sorted left/right), so it still works when the head is tilted
+    sideways or upside down."""
+    return det[:14].reshape(7, 2).astype(np.float64)
+
+
+def angles_from_rotation(R: np.ndarray) -> tuple:
+    """3x3 rotation (OpenCV camera axes) -> (yaw, pitch, roll) in degrees, in this file's directions.
+    Uses the same order the emoji filter builds its rotation in (roll, then turn, then nod), so
+    big combined tilts and turns come back exactly instead of getting mixed up."""
+    yaw = math.degrees(math.asin(max(-1.0, min(1.0, R[2, 0]))))
+    pitch = math.degrees(math.atan2(R[2, 1], R[2, 2]))
+    roll = math.degrees(math.atan2(R[1, 0], R[0, 0]))
+    return yaw, pitch, roll
+
+
+def solve_head_pose(face: Face, pts: np.ndarray, frame_size: tuple) -> tuple:
+    """Fit the 3D face model to the 5 points (eye, eye, nose, mouth corner, mouth corner)
+    to get (yaw, pitch). This is a real 3D fit, so turning and nodding are measured together."""
+    w, h = frame_size
+    camera = np.array([[FOCAL_PX, 0, w / 2], [0, FOCAL_PX, h / 2], [0, 0, 1]], dtype=np.float64)
+    if face.pose_guess is None:
+        eye_dist = max(float(np.hypot(*(pts[1] - pts[0]))), 1.0)
+        face.pose_guess = (np.zeros((3, 1)), np.array([[0.0], [0.0], [FOCAL_PX * 63 / eye_dist]]))
+    rvec, tvec = (v.copy() for v in face.pose_guess)
+    ok, rvec, tvec = cv2.solvePnP(FACE_MODEL, pts, camera, None, rvec, tvec,
+                                  useExtrinsicGuess=True, flags=cv2.SOLVEPNP_ITERATIVE)
+    yaw, pitch, _ = angles_from_rotation(cv2.Rodrigues(rvec)[0]) if ok else (90.0, 90.0, 0.0)
+    if not ok or abs(yaw) > 80 or abs(pitch) > 80 or tvec[2, 0] <= 0:
+        face.pose_guess = None   # fit went wrong -- start fresh next frame
+        return face.yaw, face.pitch
+    face.pose_guess = (rvec, tvec)
+    return yaw, pitch
+
+
+def wrap(angle: float) -> float:
+    """Keep an angle between -180 and 180."""
+    return (angle + 180) % 360 - 180
+
+
+def face_size(p: np.ndarray, yaw: float, pitch: float) -> float:
+    """The eye gap shrinks when you turn and the eye-to-mouth gap shrinks when you nod,
+    so undo each one and average them. Eye-to-mouth is ~1.28x the eye gap on real faces,
+    so it's scaled down to match. The result is about the eye gap, but steady."""
+    eye_dist = max(float(np.hypot(*(p[3] - p[2]))), 1.0)
+    down_len = max(float(np.hypot(*((p[5] + p[6]) / 2 - (p[2] + p[3]) / 2))), 1.0)
+    cos_yaw = max(math.cos(math.radians(yaw)), 0.5)
+    cos_pitch = max(math.cos(math.radians(pitch)), 0.5)
+    return (eye_dist / cos_yaw + down_len / 1.28 / cos_pitch) / 2
+
+
+def update_face(face: Face, det: np.ndarray, tilt, now: float, frame_size: tuple) -> None:
+    dt = now - face.last_seen if face.points is not None else 0.0
+    scale = max(face.size, 1.0)
+    if tilt is not None:
+        face.tilt = tilt                # carried over from last frame by optical flow
+    elif face.tilt is None:            # new face: start from the eye line
+        face.tilt = math.degrees(math.atan2(det[7] - det[5], det[6] - det[4]))
+    face.points = face.point_filter(raw_points(det), dt, scale)
+    # How fast the nose is moving, in face widths per second (for the walk-by check)
+    face.speed = float(np.hypot(*face.point_filter.velocity[4])) / (scale * 2.6)
+
+    # Turn the points so the face is upright, then fit the 3D head there. That way the turn and
+    # nod come out the same however far the head is tilted, and the tilt itself comes from
+    # optical flow (YuNet's own points barely follow a tilt).
+    c, s = math.cos(math.radians(-face.tilt)), math.sin(math.radians(-face.tilt))
+    nose = face.points[4]
+    upright = (face.points[2:7] - nose) @ np.array([[c, s], [-s, c]]) + nose
+    yaw, pitch = solve_head_pose(face, upright, frame_size)
+    roll = face.tilt
+    # Smooth the tilt the short way round (179 -> -179 is a 2 degree change, not 358)
+    if face.angle_filter.value is not None:
+        roll = face.angle_filter.value[0] + wrap(roll - face.angle_filter.value[0])
+    roll, face.yaw, face.pitch = face.angle_filter([roll, yaw, pitch], dt, 30.0)
+    face.roll = wrap(roll)
+    face.size = float(face.size_filter(face_size(face.points, face.yaw, face.pitch), dt, scale))
     face.distance = FOCAL_PX * EYE_GAP_INCHES / face.size
     face.last_seen = now
 
 
 # --- Multi-user ---
 # Match each detection to the closest person from last frame, so everyone keeps their id.
-def track(faces: dict, detections, now: float, next_id: list) -> None:
+def track(faces: dict, detections: list, now: float, next_id: list, frame_size: tuple) -> None:
     unmatched = dict(faces)
-    for det in sorted(detections, key=lambda d: -d[2]):   # biggest (closest) faces first
+    for det, tilt in sorted(detections, key=lambda d: -d[0][2]):   # biggest (closest) faces first
         nose = det[8:10]
         best, best_dist = None, None
         for face in unmatched.values():
@@ -218,20 +451,22 @@ def track(faces: dict, detections, now: float, next_id: list) -> None:
             faces[best.id] = best
         else:
             del unmatched[best.id]
-        update_face(best, det, now)
+        update_face(best, det, tilt, now, frame_size)
 
 
 # --- Opt-in zone ---
 # Only apply a filter when a person is close, looking at the screen, and fully in view.
 def is_eligible(face: Face, frame_w: int, frame_h: int) -> bool:
-    if ENFORCE_SCHEDULE and datetime.now().time() >= FILTERS_OFF_AT:
-        return False
     zone = ZONE_EXIT_INCHES if face.opted_in else ZONE_ENTER_INCHES
     angle = MAX_ANGLE if face.opted_in else RETURN_ANGLE
-    if face.distance > zone:
+    if USE_OPT_IN_ZONE and face.distance > zone:
         return False
-    if abs(face.yaw) > angle or abs(face.pitch) > angle or abs(face.roll) > angle:
+    if USE_WALK_BY_CHECK and face.speed > WALKING_SPEED:
+        return False   # walking past, not stopping to play
+    if USE_ANGLE_LIMIT and (abs(face.yaw) > angle or abs(face.pitch) > angle or abs(face.roll) > angle):
         return False
+    if not USE_OPT_IN_ZONE:
+        return True
     x, y, w, h = face.box
     if face.opted_in:
         nx, ny = face.nose   # once opted in, only the nose has to stay on screen
@@ -242,15 +477,25 @@ def is_eligible(face: Face, frame_w: int, frame_h: int) -> bool:
 # --- Fade-in ---
 # Start the filter at low opacity and raise it while the person stays. Fade out when they leave.
 def update_opacity(face: Face, eligible: bool, now: float, dt: float) -> None:
-    face.opted_in = eligible
-    if eligible:
+    # Only switch in or out once the new answer has held steady for a moment. Before, a
+    # single bad frame (noisy distance, a blink, a missed detection) restarted the fade,
+    # which is why the opacity jumped up and down at random.
+    if eligible == face.opted_in:
+        face.change_start = None
+    elif face.change_start is None:
+        face.change_start = now
+    elif now - face.change_start >= ((DWELL_SECONDS if USE_FADE_IN else 0) if eligible else LEAVE_SECONDS):
+        face.opted_in = eligible
+        face.change_start = None
+
+    if not USE_FADE_IN:
+        face.opacity = 1.0 if face.opted_in else 0.0
+        if face.opted_in:
+            face.last_eligible = now
+    elif face.opted_in:
         face.last_eligible = now
-        if face.dwell_start is None:
-            face.dwell_start = now
-        if now - face.dwell_start >= DWELL_SECONDS:
-            face.opacity = min(1.0, max(face.opacity, FADE_START) + dt * (1 - FADE_START) / FADE_IN_SECONDS)
+        face.opacity = min(1.0, max(face.opacity, FADE_START) + dt * (1 - FADE_START) / FADE_IN_SECONDS)
     else:
-        face.dwell_start = None
         face.opacity = max(0.0, face.opacity - dt / FADE_OUT_SECONDS)
 
 
@@ -293,16 +538,12 @@ def main():
     if not filters:
         print("Error: no filters loaded.")
         return
-    load_model()
+    detector = YuNetDetector()
 
-    backend = cv2.CAP_DSHOW if sys.platform.startswith("win") else cv2.CAP_ANY
-    cap = cv2.VideoCapture(0, backend)
-    if not cap.isOpened():
+    cam = Camera()
+    if not cam.running:
         print("Error: Could not open webcam.")
         return
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_SIZE[0])
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_SIZE[1])
-    detector = cv2.FaceDetectorYN.create(MODEL_PATH, "", CAMERA_SIZE, score_threshold=0.8)
     print("Running. q = quit, n = next filter, d = debug view.")
 
     faces = {}
@@ -311,34 +552,38 @@ def main():
     next_switch = time.monotonic() + FILTER_SWITCH_SECONDS
     debug = False
     last = time.monotonic()
+    fps = 0.0
 
     while True:
-        ret, frame = cap.read()
-        if not ret:
+        frame = cam.read()
+        if frame is None:
             print("Error: Failed to grab frame.")
             break
         frame = cv2.flip(frame, 1)   # mirror view, like a selfie camera
         h, w = frame.shape[:2]
         now = time.monotonic()
         dt, last = now - last, now
+        fps = smooth(fps, 1 / max(dt, 1e-3), 0.1)
+        filters_off = USE_SCHEDULE and datetime.now().time() >= FILTERS_OFF_AT
 
         # Engagement: switch between the team's filters
-        if now >= next_switch and len(filters) > 1:
+        if USE_ENGAGEMENT and now >= next_switch and len(filters) > 1:
             current = (current + 1) % len(filters)
             next_switch = now + FILTER_SWITCH_SECONDS
         active = filters[current]
 
-        detector.setInputSize((w, h))
-        _, detections = detector.detect(frame)
-        track(faces, detections if detections is not None else [], now, next_id)
+        tracked = [(f.nose, f.tilt, f.size) for f in faces.values()]
+        track(faces, detector.detect(frame, tracked), now, next_id, (w, h))
+        # Multi-user off: only the closest person (biggest face) can get a filter
+        seen_faces = [f for f in faces.values() if f.last_seen == now]
+        closest = max(seen_faces, key=lambda f: f.size).id if seen_faces else None
 
         firm = False
         anyone = False
         for face in list(faces.values()):
-            # If the detector missed someone for a moment, hold their filter steady instead of flickering
             seen = face.last_seen == now
-            if seen or now - face.last_seen > LOST_GRACE_SECONDS:
-                update_opacity(face, seen and is_eligible(face, w, h), now, dt)
+            allowed = USE_MULTI_USER or face.id == closest
+            update_opacity(face, seen and allowed and not filters_off and is_eligible(face, w, h), now, dt)
             # Forget people who are gone and fully faded out
             if now - face.last_seen > LOST_GRACE_SECONDS and face.opacity <= 0:
                 for f in filters:
@@ -349,18 +594,19 @@ def main():
             if face.opacity > 0:
                 anyone = True
                 active.apply(frame, face, face.opacity)
-            firm |= draw_timer(frame, face, now)
+            if USE_TIMER:
+                firm |= draw_timer(frame, face, now)
             if debug:
                 draw_debug(frame, face)
 
         if firm:
             draw_text(frame, "3 minutes! Time to get back to your work.", w / 2, 40, 0.8, (0, 200, 255), 2)
-        if ENFORCE_SCHEDULE and datetime.now().time() >= FILTERS_OFF_AT:
+        if filters_off:
             draw_text(frame, "Filters are off for the day", w / 2, h - 16, 0.5, (200, 200, 200))
-        elif not anyone:
+        elif USE_HINT_TEXT and not anyone:
             draw_text(frame, "Step up close and look here to try a filter", w / 2, h - 16, 0.5, (255, 255, 255))
         if debug:
-            draw_text(frame, f"Filter: {active.name}", 80, 20, 0.5, (255, 255, 0))
+            draw_text(frame, f"Filter: {active.name}  {fps:.0f} FPS", 110, 20, 0.5, (255, 255, 0))
 
         cv2.imshow("Hallway Filter", frame)
         key = cv2.waitKey(1) & 0xFF
@@ -371,9 +617,11 @@ def main():
             next_switch = now + FILTER_SWITCH_SECONDS
         if key == ord('d'):
             debug = not debug
+            for f in filters:
+                f.debug = debug   # lets a filter draw its own debug info too
 
     # The frame only ever lived in memory and gets overwritten every loop. Nothing is saved.
-    cap.release()
+    cam.release()
     cv2.destroyAllWindows()
 
 

@@ -1,5 +1,7 @@
 __pycache__/
 *.pyc
 .venv/
-# Downloaded automatically by common/main.py
+# Model files downloaded automatically the first time
 *.onnx
+*.npz
+.DS_Store

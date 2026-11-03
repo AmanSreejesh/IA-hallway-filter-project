@@ -54,6 +54,8 @@ USE_MULTI_USER = True     # everyone in view gets a filter (off = only the close
 USE_ENGAGEMENT = True     # rotate between filters every FILTER_SWITCH_SECONDS ('n' still works when off)
 USE_SCHEDULE = False       # filters turn off at FILTERS_OFF_AT
 USE_HINT_TEXT = True      # "Step up close..." message when nobody is using a filter
+USE_ULTRASONIC = True     # on a Raspberry Pi, measure the opt-in zone with an ultrasonic sensor
+                          # (ignored on other computers, which use the camera estimate instead)
 
 # --- Settings (keep in sync with constraints.md) ---
 CAMERA_SIZE = (640, 480)
@@ -62,12 +64,39 @@ DETECT_SCALE = 0.5        # look for faces on a half-size copy of the frame (~4x
 NEW_FACE_EVERY = 3        # while someone's being tracked, scan the whole picture for new people every N frames
 SEARCH_ANGLES = (40, -40, 80, -80, 130, -130, 180)   # tilts tried when nobody is in view
 
-# Opt-in zone. Distance is estimated from how far apart the eyes look on screen.
+# Opt-in zone. On a Raspberry Pi with the ultrasonic sensor, distance comes from the sensor.
+# Otherwise it's estimated from how far apart the eyes look on screen.
 FOCAL_PX = 600            # camera focal length in pixels -- calibrate with the 'd' debug view
 EYE_GAP_INCHES = 2.5      # average distance between a person's eyes
 ZONE_ENTER_INCHES = 30    # step closer than this to opt in
 ZONE_EXIT_INCHES = 33     # ...and you have to step back past this to opt out.
                           # The gap between the two stops flicker at the border.
+# Ultrasonic sensor (Raspberry Pi only). An HC-SR04 sends out a click of sound and times the echo,
+# which measures distance far more accurately than guessing from the size of a face on camera.
+#
+# WIRING (HC-SR04 -> Raspberry Pi 40-pin header; pin numbers are the physical pin numbers):
+#
+#     HC-SR04 VCC  ->  pin 2  (5V)
+#     HC-SR04 GND  ->  pin 6  (GND)
+#     HC-SR04 TRIG ->  pin 16 (GPIO 23)        direct wire is fine (the Pi sends 3.3V, the sensor accepts it)
+#     HC-SR04 ECHO ->  1k ohm resistor ->  pin 18 (GPIO 24)
+#                                     |
+#                                     +->  2k ohm resistor ->  pin 14 (GND)
+#
+#   ECHO sends back 5V, which can damage the Pi's 3.3V pins. The 1k + 2k resistors form a
+#   voltage divider that drops it to ~3.3V. (No 2k? Two 1k in series works. A 3.3V-only
+#   "HC-SR04P" sensor powered from pin 1 doesn't need the resistors.)
+#
+#   Mount the sensor right next to the camera, pointing the same way, at about chest-to-face
+#   height. It measures the closest thing in a ~15 degree cone in front of it, so keep walls and
+#   furniture out of that cone (or farther away than ZONE_EXIT_INCHES).
+#
+#   Software: gpiozero comes with Raspberry Pi OS. If it's missing: sudo apt install python3-gpiozero
+#   (if you use a virtual environment, create it with --system-site-packages so it can see gpiozero).
+SENSOR_TRIGGER_GPIO = 23
+SENSOR_ECHO_GPIO = 24
+SENSOR_MAX_INCHES = 120   # readings past this count as "nobody there"
+
 WALKING_SPEED = 2.0       # moving faster than this (face widths per second) = walking past, no filter
 MAX_ANGLE = 45            # turn/tilt your head past this and the filter goes away
 RETURN_ANGLE = 40         # ...and comes back once you're under this (same anti-flicker idea)
@@ -266,6 +295,57 @@ class Camera:
         self.cap.release()
 
 
+# --- Ultrasonic sensor (opt-in zone on the Raspberry Pi) ---
+def is_raspberry_pi() -> bool:
+    """True when running on a Raspberry Pi (it writes its model name to this file)."""
+    try:
+        with open("/proc/device-tree/model") as f:
+            return "raspberry pi" in f.read().lower()
+    except OSError:
+        return False
+
+
+class UltrasonicSensor:
+    """HC-SR04 distance sensor. gpiozero pings it on a background thread and averages the
+    last few readings, so reading it costs nothing in the main loop. See the wiring above."""
+
+    def __init__(self):
+        from gpiozero import DistanceSensor   # only exists on the Pi, so imported here
+        self.sensor = DistanceSensor(echo=SENSOR_ECHO_GPIO, trigger=SENSOR_TRIGGER_GPIO,
+                                     max_distance=SENSOR_MAX_INCHES * 0.0254)
+
+    def inches(self) -> float:
+        return self.sensor.distance / 0.0254   # gpiozero reports meters
+
+    def close(self):
+        self.sensor.close()
+
+
+def start_sensor():
+    """The sensor on a Raspberry Pi (if turned on and wired up), otherwise None."""
+    if not USE_ULTRASONIC or not is_raspberry_pi():
+        return None
+    try:
+        sensor = UltrasonicSensor()
+        print(f"Ultrasonic sensor on: {sensor.inches():.0f} in to the closest thing in front of it.")
+        return sensor
+    except Exception as e:
+        print(f"Ultrasonic sensor not working ({e}); using the camera to estimate distance instead.")
+        return None
+
+
+def apply_sensor_distance(faces: list, sensor_inches: float) -> None:
+    """The sensor measures one thing: how far away the closest person is. That's the closest
+    (biggest) face, so it gets the sensor's distance. Everyone else gets their camera estimate
+    corrected by the same amount, which also fixes any error in FOCAL_PX."""
+    if not faces:
+        return
+    closest = max(faces, key=lambda f: f.size)
+    correction = sensor_inches / max(closest.camera_distance, 1.0)
+    for f in faces:
+        f.distance = f.camera_distance * correction
+
+
 # --- Face data handed to every filter ---
 class Face:
     """One tracked person. Everything here is already smoothed.
@@ -286,6 +366,7 @@ class Face:
         self.size = 0.0
         self.roll = self.yaw = self.pitch = 0.0
         self.distance = 999.0
+        self.camera_distance = 999.0   # distance guessed from face size (main loop may replace .distance with the sensor's)
         self.speed = 0.0        # face widths per second
         # system state (filters don't need these)
         self.point_filter = Smoother()
@@ -430,7 +511,8 @@ def update_face(face: Face, det: np.ndarray, tilt, now: float, frame_size: tuple
     roll, face.yaw, face.pitch = face.angle_filter([roll, yaw, pitch], dt, 30.0)
     face.roll = wrap(roll)
     face.size = float(face.size_filter(face_size(face.points, face.yaw, face.pitch), dt, scale))
-    face.distance = FOCAL_PX * EYE_GAP_INCHES / face.size
+    face.camera_distance = FOCAL_PX * EYE_GAP_INCHES / face.size
+    face.distance = face.camera_distance
     face.last_seen = now
 
 
@@ -540,6 +622,7 @@ def main():
         return
     detector = YuNetDetector()
 
+    sensor = start_sensor()
     cam = Camera()
     if not cam.running:
         print("Error: Could not open webcam.")
@@ -577,6 +660,10 @@ def main():
         # Multi-user off: only the closest person (biggest face) can get a filter
         seen_faces = [f for f in faces.values() if f.last_seen == now]
         closest = max(seen_faces, key=lambda f: f.size).id if seen_faces else None
+        # Opt-in zone on the Pi: use the ultrasonic sensor's distance instead of the camera's guess
+        sensor_inches = sensor.inches() if sensor else None
+        if sensor_inches is not None:
+            apply_sensor_distance(seen_faces, sensor_inches)
 
         firm = False
         anyone = False
@@ -606,7 +693,8 @@ def main():
         elif USE_HINT_TEXT and not anyone:
             draw_text(frame, "Step up close and look here to try a filter", w / 2, h - 16, 0.5, (255, 255, 255))
         if debug:
-            draw_text(frame, f"Filter: {active.name}  {fps:.0f} FPS", 110, 20, 0.5, (255, 255, 0))
+            sensor_text = f"  sensor {sensor_inches:.0f}in" if sensor_inches is not None else ""
+            draw_text(frame, f"Filter: {active.name}  {fps:.0f} FPS{sensor_text}", 140, 20, 0.5, (255, 255, 0))
 
         cv2.imshow("Hallway Filter", frame)
         key = cv2.waitKey(1) & 0xFF
@@ -622,6 +710,8 @@ def main():
 
     # The frame only ever lived in memory and gets overwritten every loop. Nothing is saved.
     cam.release()
+    if sensor:
+        sensor.close()
     cv2.destroyAllWindows()
 
 

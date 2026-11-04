@@ -5,8 +5,11 @@ Combines each team member's filter and applies the shared features to all of the
 Run from the repo root:
     python common/main.py              # every filter, taking turns
     python common/main.py emoji        # only the filters you name (for testing your own)
+    python common/main_mediapipe.py    # same system, but with MediaPipe face tracking (much better head angles)
 
 Keys:  q = quit   n = next filter   d = debug view (distance, head angles, FPS -- for calibrating)
+       c = calibrate "looking forward": look straight at the screen and press c (saved for next time)
+       l = start/stop recording head angles to common/pose_log.csv (numbers only, for finding problems)
 
 How a filter plugs in (see viraj/emoji_filter.py for an example):
   - Make a class with a `name`, an `apply(frame, face, opacity)` method that draws onto
@@ -17,7 +20,9 @@ How a filter plugs in (see viraj/emoji_filter.py for an example):
 
 Nothing is ever saved. Each frame is grabbed, drawn on, shown, and then thrown away.
 """
+import csv
 import importlib
+import json
 import math
 import os
 import sys
@@ -128,6 +133,14 @@ FILTER_SWITCH_SECONDS = 30    # rotate to the next filter this often
 # Schedule: filters turn off after dismissal so nobody heading to the buses gets stopped
 FILTERS_OFF_AT = dtime(16, 15)
 
+# Looking forward. The camera sits above or below the screen, so someone looking at the screen
+# looks slightly down or up to the camera (and each tracker has its own small bias). These are the
+# head angles that count as "looking straight ahead". Press c while looking at the screen to set
+# them; they're saved to calibration.json (separately for YuNet and MediaPipe) and loaded every time.
+CALIBRATION_PATH = os.path.join(COMMON_DIR, "calibration.json")
+FORWARD = {"yaw": 0.0, "pitch": 0.0}
+POSE_LOG_PATH = os.path.join(COMMON_DIR, "pose_log.csv")
+
 
 # --- Imports: each team member's filter ---
 def load_filters(names: list) -> list:
@@ -158,7 +171,11 @@ def download(url: str, path: str) -> None:
 
 
 # --- Face detector ---
-# detect() returns one row per face: [x, y, w, h, eye1 x,y, eye2 x,y, nose x,y, mouth1 x,y, mouth2 x,y, score]
+# detect() returns (row, tilt, pose) per face:
+#   row  = [x, y, w, h, eye1 x,y, eye2 x,y, nose x,y, mouth1 x,y, mouth2 x,y, score]
+#   tilt = head tilt in degrees if the detector knows it, else None
+#   pose = (yaw, pitch) if the detector measures them itself (MediaPipe does), else None
+# common/main_mediapipe.py plugs in a different detector this way.
 # YuNet always lists the points in the same order (eye, eye, nose, mouth corner, mouth corner),
 # even when the head is upside down, so the order tells us which way the face is pointing.
 class YuNetDetector:
@@ -219,7 +236,7 @@ class YuNetDetector:
         return 0.0 if motion is None else math.degrees(math.atan2(motion[1, 0], motion[0, 0]))
 
     def detect(self, frame: np.ndarray, tracked: list = ()) -> list:
-        """Returns (row, tilt) per face. `tracked` = (nose, tilt, size) for each person from
+        """Returns (row, tilt, None) per face. `tracked` = (nose, tilt, size) for each person from
         last frame. Their new tilt is last tilt + how far the face rotated (optical flow), and
         they're looked for in a copy of the picture turned so their face is upright.
         For brand-new faces, tilt is None (main.py starts it from the eye line)."""
@@ -251,7 +268,7 @@ class YuNetDetector:
         self.prev_gray = gray
         for f, _ in found:
             f[:14] /= DETECT_SCALE
-        return found
+        return [(f, tilt, None) for f, tilt in found]
 
 
 # --- Camera ---
@@ -374,6 +391,7 @@ class Face:
         self.size_filter = Smoother()
         self.pose_guess = None  # last 3D head pose, used as the starting point for the next frame
         self.tilt = None        # how far the head is tilted in the picture, tracked by optical flow
+        self.raw_yaw = self.raw_pitch = 0.0   # this frame's measurement, before calibration and smoothing
         self.last_seen = 0.0
         self.opted_in = False
         self.change_start = None
@@ -486,7 +504,7 @@ def face_size(p: np.ndarray, yaw: float, pitch: float) -> float:
     return (eye_dist / cos_yaw + down_len / 1.28 / cos_pitch) / 2
 
 
-def update_face(face: Face, det: np.ndarray, tilt, now: float, frame_size: tuple) -> None:
+def update_face(face: Face, det: np.ndarray, tilt, pose, now: float, frame_size: tuple) -> None:
     dt = now - face.last_seen if face.points is not None else 0.0
     scale = max(face.size, 1.0)
     if tilt is not None:
@@ -500,10 +518,15 @@ def update_face(face: Face, det: np.ndarray, tilt, now: float, frame_size: tuple
     # Turn the points so the face is upright, then fit the 3D head there. That way the turn and
     # nod come out the same however far the head is tilted, and the tilt itself comes from
     # optical flow (YuNet's own points barely follow a tilt).
-    c, s = math.cos(math.radians(-face.tilt)), math.sin(math.radians(-face.tilt))
-    nose = face.points[4]
-    upright = (face.points[2:7] - nose) @ np.array([[c, s], [-s, c]]) + nose
-    yaw, pitch = solve_head_pose(face, upright, frame_size)
+    if pose is not None:
+        yaw, pitch = pose   # the detector measured it (MediaPipe)
+    else:
+        c, s = math.cos(math.radians(-face.tilt)), math.sin(math.radians(-face.tilt))
+        nose = face.points[4]
+        upright = (face.points[2:7] - nose) @ np.array([[c, s], [-s, c]]) + nose
+        yaw, pitch = solve_head_pose(face, upright, frame_size)
+    face.raw_yaw, face.raw_pitch = yaw, pitch
+    yaw, pitch = yaw - FORWARD["yaw"], pitch - FORWARD["pitch"]   # so looking at the screen = 0, 0
     roll = face.tilt
     # Smooth the tilt the short way round (179 -> -179 is a 2 degree change, not 358)
     if face.angle_filter.value is not None:
@@ -520,7 +543,7 @@ def update_face(face: Face, det: np.ndarray, tilt, now: float, frame_size: tuple
 # Match each detection to the closest person from last frame, so everyone keeps their id.
 def track(faces: dict, detections: list, now: float, next_id: list, frame_size: tuple) -> None:
     unmatched = dict(faces)
-    for det, tilt in sorted(detections, key=lambda d: -d[0][2]):   # biggest (closest) faces first
+    for det, tilt, pose in sorted(detections, key=lambda d: -d[0][2]):   # biggest (closest) faces first
         nose = det[8:10]
         best, best_dist = None, None
         for face in unmatched.values():
@@ -533,7 +556,7 @@ def track(faces: dict, detections: list, now: float, next_id: list, frame_size: 
             faces[best.id] = best
         else:
             del unmatched[best.id]
-        update_face(best, det, tilt, now, frame_size)
+        update_face(best, det, tilt, pose, now, frame_size)
 
 
 # --- Opt-in zone ---
@@ -615,19 +638,26 @@ def draw_debug(frame, face: Face) -> None:
 
 
 # --- Main camera loop ---
-def main():
+def main(make_detector=YuNetDetector):
     filters = load_filters(sys.argv[1:])
     if not filters:
         print("Error: no filters loaded.")
         return
-    detector = YuNetDetector()
+    detector = make_detector()
+    tracker = make_detector.__name__
+    saved = {}
+    if os.path.exists(CALIBRATION_PATH):
+        with open(CALIBRATION_PATH) as f:
+            saved = json.load(f)
+    FORWARD.update(saved.get(tracker, {}))
 
     sensor = start_sensor()
     cam = Camera()
     if not cam.running:
         print("Error: Could not open webcam.")
         return
-    print("Running. q = quit, n = next filter, d = debug view.")
+    print("Running. q = quit, n = next filter, d = debug view, c = calibrate forward, l = record angles.")
+    log_file = log = None
 
     faces = {}
     next_id = [0]
@@ -703,6 +733,30 @@ def main():
         if key == ord('n'):
             current = (current + 1) % len(filters)
             next_switch = now + FILTER_SWITCH_SECONDS
+        if key == ord('c') and seen_faces:
+            # whoever is closest is looking straight at the screen right now
+            f = max(seen_faces, key=lambda f: f.size)
+            FORWARD.update(yaw=round(f.raw_yaw, 1), pitch=round(f.raw_pitch, 1))
+            saved[tracker] = dict(FORWARD)
+            with open(CALIBRATION_PATH, "w") as out:
+                json.dump(saved, out, indent=2)
+            print(f"Calibrated looking forward: yaw {FORWARD['yaw']}, pitch {FORWARD['pitch']} (saved)")
+        if key == ord('l'):
+            if log_file:
+                log_file.close()
+                log_file = log = None
+                print(f"Stopped recording. Saved to {POSE_LOG_PATH}")
+            else:
+                log_file = open(POSE_LOG_PATH, "w", newline="")
+                log = csv.writer(log_file)
+                log.writerow(["time", "face", "raw_yaw", "raw_pitch", "tilt", "yaw", "pitch", "roll",
+                              "nose_x", "nose_y", "size", "distance", "opacity"])
+                print(f"Recording head angles to {POSE_LOG_PATH} (press l again to stop)")
+        if log:
+            for f in seen_faces:
+                log.writerow([f"{now:.3f}", f.id, f"{f.raw_yaw:.2f}", f"{f.raw_pitch:.2f}", f"{f.tilt:.2f}",
+                              f"{f.yaw:.2f}", f"{f.pitch:.2f}", f"{f.roll:.2f}", f"{f.nose[0]:.1f}", f"{f.nose[1]:.1f}",
+                              f"{f.size:.1f}", f"{f.distance:.1f}", f"{f.opacity:.2f}"])
         if key == ord('d'):
             debug = not debug
             for f in filters:
@@ -710,6 +764,8 @@ def main():
 
     # The frame only ever lived in memory and gets overwritten every loop. Nothing is saved.
     cam.release()
+    if log_file:
+        log_file.close()
     if sensor:
         sensor.close()
     cv2.destroyAllWindows()

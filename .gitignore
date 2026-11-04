@@ -1,7 +1,10 @@
 __pycache__/
 *.pyc
 .venv/
+.DS_Store
 # Model files downloaded automatically the first time
 *.onnx
-*.npz
-.DS_Store
+*.task
+# Per-installation files written by common/main.py
+common/calibration.json
+common/pose_log.csv

@@ -1,6 +1,6 @@
 # pip install -r requirements.txt
-opencv-python
-numpy
-mediapipe   # face tracking for filters that turn with your head (without it, YuNet is used)
+opencv-contrib-python>=4.11,<6  # also used by MediaPipe; install only one OpenCV package
+numpy>=1.26,<3
+mediapipe>=0.10.30,<0.11   # Tasks API with iris landmarks; required for Sharingan
 moderngl    # faster, smoother 3D emojis (without it, they're drawn with OpenCV)
 # The ultrasonic sensor uses gpiozero, which already comes with Raspberry Pi OS.

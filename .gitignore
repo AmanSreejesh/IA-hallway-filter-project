@@ -5,6 +5,10 @@ __pycache__/
 # Model files downloaded automatically the first time
 *.onnx
 *.task
+*.task.part
+*.task.*.part
+*.onnx.*.part
 # Per-installation files written by common/main.py
 common/calibration.json
+common/calibration.json.part
 common/pose_log.csv

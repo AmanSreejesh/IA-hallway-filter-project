@@ -75,6 +75,7 @@ def draw_emoji(frame: np.ndarray, renderer, name: str, face, opacity: float) -> 
 
 class EmojiFilter:
     name = "Emoji"
+    tracker = "mediapipe"   # the 3D emoji turns with your head, so it wants MediaPipe's accurate head angles
 
     def __init__(self):
         self.renderer = make_renderer(RENDERER)

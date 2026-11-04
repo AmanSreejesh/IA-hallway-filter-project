@@ -1,0 +1,6 @@
+# pip install -r requirements.txt
+opencv-python
+numpy
+mediapipe   # face tracking for filters that turn with your head (without it, YuNet is used)
+moderngl    # faster, smoother 3D emojis (without it, they're drawn with OpenCV)
+# The ultrasonic sensor uses gpiozero, which already comes with Raspberry Pi OS.

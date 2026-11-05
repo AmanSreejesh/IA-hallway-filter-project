@@ -12,8 +12,8 @@ import numpy as np
 from common.overlay import draw_artwork, premultiply
 
 NOSE_PATH = Path(__file__).with_name("clown_nose.png")
-# Preserve Aryan's 0.475 * face-width sizing using a turn-independent eye gap.
-NOSE_SCALE = 0.475 * 2.6
+# Preserve Aryan's 0.400 * face-width sizing using a turn-independent eye gap.
+NOSE_SCALE = 0.400 * 2.6
 
 
 def make_nose(size=192):

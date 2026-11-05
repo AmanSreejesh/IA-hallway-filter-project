@@ -12,3 +12,4 @@ __pycache__/
 common/calibration.json
 common/calibration.json.part
 common/pose_log.csv
+common/.install_skipped

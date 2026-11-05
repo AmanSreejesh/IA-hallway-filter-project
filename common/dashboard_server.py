@@ -4,7 +4,7 @@ The touchscreen dashboard: a tiny web server that main.py runs alongside the cam
   - /          the dashboard page (files in common/dashboard/)
   - /stream    the camera feed, with the filters already drawn on, as an MJPEG stream
   - /api/state what's on right now (polled by the page about once a second)
-  - /api/do    the page's buttons: pick a filter, take turns, calibrate, debug view
+  - /api/do    the page's buttons: pick a filter, take turns, calibrate, set the 30-inch distance, debug view
 
 It only uses Python's standard library, so there's nothing extra to install. It listens on
 127.0.0.1 by default, which means only the computer it runs on can see the camera feed.
@@ -24,7 +24,7 @@ import cv2
 
 PAGE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dashboard")
 JPEG_QUALITY = 80          # lower = less work for the Pi, blurrier picture
-ACTIONS = {"select", "auto", "next", "calibrate", "debug"}
+ACTIONS = {"select", "auto", "next", "calibrate", "zone", "debug"}
 mimetypes.add_type("font/woff2", ".woff2")
 
 

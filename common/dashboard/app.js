@@ -202,7 +202,8 @@ function render() {
   $("off").classList.toggle("on", state.off);
   $("firm").classList.toggle("on", state.firm && !state.off);
   $("debug").textContent = `Debug view: ${state.debug ? "on" : "off"}`;
-  $("staffInfo").textContent = `${state.tracker}, ${state.fps} frames a second`;
+  $("staffInfo").textContent = `${state.tracker}, ${state.fps} frames a second. ${state.zone_note || ""}`;
+  updatePrivacy();
   if (sel < 0) draw();
 }
 
@@ -336,6 +337,32 @@ function isKiosk() { return window.innerHeight >= screen.height - 2 && window.in
 
 window.addEventListener("resize", () => { size = wheel.offsetWidth; draw(); });
 document.addEventListener("contextmenu", (e) => e.preventDefault());
+
+// ---------- privacy card: hidden by its button, fades back once that person has left ----------
+// Someone right at the touchscreen is often too close for the camera to see, so this doesn't wait
+// to "see them leave": it comes back once nobody has been in view for a moment, but never sooner
+// than PRIVACY_MIN_HIDDEN after the tap.
+const PRIVACY_BACK_AFTER = 2;       // seconds with nobody in view (measured by main.py)
+const PRIVACY_MIN_HIDDEN = 4000;    // ms
+let privacyHidden = false;
+let privacyHiddenAt = 0;
+
+$("privacy").addEventListener("pointerdown", (e) => e.stopPropagation());   // not a tap on the picture
+$("privacyHide").addEventListener("click", () => {
+  privacyHidden = true;
+  privacyHiddenAt = performance.now();
+  $("privacy").classList.add("away");
+  setTimeout(updatePrivacy, PRIVACY_MIN_HIDDEN + 50);
+});
+
+function updatePrivacy() {
+  if (!privacyHidden || !state) return;
+  if (performance.now() - privacyHiddenAt < PRIVACY_MIN_HIDDEN) return;
+  if (isLost || (state.empty_for ?? 0) >= PRIVACY_BACK_AFTER) {   // lost the program: show it anyway
+    privacyHidden = false;
+    $("privacy").classList.remove("away");
+  }
+}
 
 // ---------- staff: hold the top-left corner for 2 seconds ----------
 let holdTimer = 0;

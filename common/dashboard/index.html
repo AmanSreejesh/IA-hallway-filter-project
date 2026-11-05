@@ -11,6 +11,16 @@
 <img id="feed" src="stream" alt="" draggable="false">
 
 <p class="pill pill-top" id="message" role="status"></p>
+
+<!-- Privacy: on screen until someone hides it, and fades back once they've left.
+     Every line here must stay true of this kiosk. -->
+<aside class="privacy" id="privacy" aria-label="Privacy">
+  <p class="privacy-head">This camera doesn't record</p>
+  <p>It shows you on this screen and finds faces so the filters can follow them.</p>
+  <p>Pictures never leave this computer and are never saved. Each one is gone right after it's shown.</p>
+  <p>To stay off the screen, step out of the camera's view. Filters only appear within 2.5 feet.</p>
+  <button class="privacy-hide" id="privacyHide" type="button">Hide</button>
+</aside>
 <p class="pill pill-name" id="name"></p>
 
 <div class="card-wrap" id="firm">
@@ -37,6 +47,7 @@
 <div class="card-wrap staff" id="staff" hidden>
   <div class="card">
     <button class="btn" data-staff="calibrate" id="calibrate">Calibrate (look straight at the screen)</button>
+    <button class="btn" data-staff="zone">Set 30-inch distance (eyes exactly 30 in from the camera)</button>
     <button class="btn" data-staff="debug" id="debug">Debug view: off</button>
     <button class="btn" data-staff="fullscreen">Full screen</button>
     <button class="btn btn-quiet" data-staff="close">Close</button>

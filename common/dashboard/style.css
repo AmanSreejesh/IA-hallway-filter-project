@@ -60,6 +60,47 @@ body.idle, body.idle * { cursor: none !important; }
   transition: none;   /* moved by the wheel's springs instead */
 }
 
+/* ---- Privacy: top right (top left is the staff corner). Fades out when hidden, back in later ---- */
+.privacy {
+  position: fixed;
+  top: var(--edge);
+  right: var(--edge);
+  width: clamp(260px, 27vw, 400px);
+  background: var(--white);
+  color: var(--ink);
+  border-radius: 18px;
+  padding: 14px 16px;
+  font-size: clamp(14px, 2vh, 20px);
+  line-height: 1.35;
+  display: grid;
+  gap: 6px;
+  opacity: 1;
+  transform: none;
+  transition: opacity 700ms ease, transform 700ms ease, visibility 0s;
+}
+.privacy.away {
+  opacity: 0;
+  transform: translateY(-6px) scale(0.98);
+  visibility: hidden;
+  transition: opacity 500ms ease, transform 500ms ease, visibility 0s linear 500ms;
+}
+.privacy-head { font-weight: 700; font-size: 1.1em; }
+.privacy-hide {
+  all: unset;
+  box-sizing: border-box;
+  justify-self: end;
+  min-height: 44px;
+  padding: 10px 22px;
+  margin-top: 4px;
+  border-radius: 999px;
+  background: var(--ink);
+  color: var(--white);
+  font-weight: 600;
+  cursor: pointer;
+  transition: transform 160ms ease;
+}
+.privacy-hide:active { transform: scale(0.95); }
+
 .card-wrap {
   position: fixed;
   inset: 0;

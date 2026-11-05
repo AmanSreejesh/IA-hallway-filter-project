@@ -23,15 +23,18 @@ from viraj.emoji_filter import rotation
 
 
 def detection(distance=24, center=(320, 240), roll=0, yaw=0, pitch=0):
-    """Generate current-frame points at a calibrated distance, including iris mesh."""
-    size = system.FOCAL_PX * system.EYE_GAP_INCHES / distance
+    """Generate current-frame points, including iris mesh, for someone `distance` inches away
+    (straight-line, like a tape measure) with the point between their eyes at `center`."""
+    ray = math.hypot((center[0] - 320) / system.FOCAL_PX, (center[1] - 240) / system.FOCAL_PX, 1.0)
+    size = system.FOCAL_PX * system.EYE_GAP_INCHES * ray / distance
     angle = math.radians(roll)
     rotate = np.array([[math.cos(angle), -math.sin(angle)],
                        [math.sin(angle), math.cos(angle)]])
     turn = math.cos(math.radians(yaw))
+    eyes_at = np.array([0, -0.55]) @ rotate.T * size   # so the eyes' midpoint lands on `center`
 
     def pixels(points):
-        return (np.asarray(points) * [turn, 1]) @ rotate.T * size + center
+        return (np.asarray(points) * [turn, 1]) @ rotate.T * size + center - eyes_at
 
     points = pixels([[-0.5, -0.55], [0.5, -0.55], [0, 0], [-0.4, 0.6], [0.4, 0.6]])
     row = np.array([center[0]-1.3*size, center[1]-1.5*size, 2.6*size, 3*size,
@@ -73,12 +76,12 @@ class AcceptanceTests(unittest.TestCase):
         self.forward.start()
         self.addCleanup(self.forward.stop)
 
-    def step(self, faces, effect, now, detections=(), *, off=False, sensor=None):
+    def step(self, faces, effect, now, detections=(), *, off=False):
         next_id = [max(faces, default=-1)+1]
         system.track(faces, detections, now, next_id, (640, 480))
         frame = np.full((480, 640, 3), 140, np.uint8)
         result = system.process_faces(frame, faces, [effect], effect, now, 0.1,
-                                      filters_off=off, sensor_inches=sensor, draw_notes=False)
+                                      filters_off=off, draw_notes=False)
         return frame, result
 
     def test_registry_loads_every_filter(self):
@@ -101,7 +104,8 @@ class AcceptanceTests(unittest.TestCase):
                     with self.subTest(filter=actual.name, trial=trial, center=center, roll=roll):
                         faces, effect = {}, RecordingFilter(actual)
                         frame, _ = self.step(faces, effect, 10, [detection(30, center, roll)])
-                        self.assertEqual(effect.calls, [(0, 0.1)])
+                        self.assertEqual(len(effect.calls), 1)
+                        self.assertAlmostEqual(effect.calls[0][1], 0.1, places=4)   # edge of the zone
                         self.assertAlmostEqual(faces[0].roll, roll)
                         self.assertFalse(np.all(frame == 140), "actual renderer must draw")
 
@@ -116,20 +120,63 @@ class AcceptanceTests(unittest.TestCase):
                     frame, _ = self.step(faces, effect, 10+elapsed, [detection(24, center)])
                     self.assertFalse(np.all(frame == 140))
                     self.assertEqual(len(effect.calls), round(elapsed*10)+1)
-                self.assertEqual(effect.calls[0], (0, 0.1))
+                self.assertAlmostEqual(effect.calls[0][1], 1.0)   # 24 in: inside 25, fully visible
 
     def test_sixty_degree_turn_starts_at_point_one_and_increases_five_trials(self):
+        # Fade is by distance: 0.1 at the 30-inch edge, rising as they come closer, full at 25.
         for actual in self.filters:
             for trial in range(5):
                 with self.subTest(filter=actual.name, trial=trial):
                     faces, effect = {}, RecordingFilter(actual)
-                    det = detection(yaw=(-1)**trial*60)
-                    for now in (10.0, 10.1, 10.2, 10.4):
-                        self.step(faces, effect, now, [det])
+                    for now, inches in ((10.0, 30), (10.1, 28.5), (10.2, 27), (10.3, 25)):
+                        self.step(faces, effect, now, [detection(inches, yaw=(-1)**trial*60)])
                     opacity = [value for _, value in effect.calls]
-                    self.assertAlmostEqual(opacity[0], 0.1)
+                    self.assertAlmostEqual(opacity[0], 0.1, places=4)
                     self.assertTrue(all(a < b for a, b in zip(opacity, opacity[1:])))
-                    self.assertAlmostEqual(opacity[-1], 1)
+                    self.assertAlmostEqual(opacity[-1], 1, places=4)
+
+    def test_fade_is_linear_by_distance_between_25_and_30_inches(self):
+        for inches, expected in [(6, 1), (24.9, 1), (25, 1), (26, 0.82), (27.5, 0.55), (29, 0.28),
+                                 (30, 0.1), (30.01, 0), (40, 0)]:
+            with self.subTest(inches=inches):
+                self.assertAlmostEqual(system.zone_opacity(inches), expected, places=6)
+
+    def test_distance_is_exact_off_centre_turned_and_tilted(self):
+        # A real pinhole projection: eyes 2.5 in apart anywhere in front of the camera, turned up
+        # to 60 degrees and tilted up to 45, as long as the camera can see the face (60 degrees).
+        f, size = system.FOCAL_PX, (640, 480)
+        for x, y, z in [(0, 0, 30), (-10, 6, 26), (9, -7, 24), (12, 8, 20), (-6, -8, 28)]:
+            for yaw in (-60, -30, 0, 30, 60):
+                for roll in (-45, 0, 45):
+                    c, s = math.cos(math.radians(yaw)), math.sin(math.radians(yaw))
+                    eye = np.array([c*math.cos(math.radians(roll)), c*math.sin(math.radians(roll)), s])
+                    nose = np.array([s, 0, -c])
+                    middle = np.array([x, y, z], float)
+                    if np.degrees(np.arccos(nose @ -middle / np.linalg.norm(middle))) > 60:
+                        continue   # seen from the side: the camera can't see both eyes
+                    pixel = lambda p: (f*p[0]/p[2] + size[0]/2, f*p[1]/p[2] + size[1]/2)
+                    points = np.zeros((7, 2))
+                    points[2], points[3] = pixel(middle - eye*1.25), pixel(middle + eye*1.25)
+                    points[4] = pixel(middle + nose)
+                    with self.subTest(position=(x, y, z), yaw=yaw, roll=roll):
+                        true = float(np.linalg.norm(middle))
+                        self.assertAlmostEqual(system.estimate_distance(points, yaw, size), true,
+                                               delta=true*0.002)
+
+    def test_pressing_z_makes_thirty_inches_exact_for_any_eye_gap(self):
+        size = (640, 480)
+        for gap in (2.0, 2.2, 2.5, 2.8):   # children to large adults
+            with self.subTest(gap=gap), patch.object(system, "DISTANCE_K", None), \
+                    patch.object(system, "EYE_GAP_INCHES", gap):
+                person = system.Face(0)
+                system.update_face(person, detection(30, (380, 200))[0], 0, (0, 0), 0, size)
+            with self.subTest(gap=gap), patch.object(system, "DISTANCE_K", system.distance_k_sample(person, size)):
+                for inches in (25, 29.99, 30, 30.01):
+                    with patch.object(system, "EYE_GAP_INCHES", gap):
+                        row = detection(inches, (300, 260), roll=20)[0]
+                    face = system.Face(1)
+                    system.update_face(face, row, 20, (0, 0), 1, size)
+                    self.assertAlmostEqual(face.distance, inches, places=3)
 
     def test_profile_five_feet_two_second_crossing_five_trials(self):
         for actual in self.filters:
@@ -193,7 +240,7 @@ class AcceptanceTests(unittest.TestCase):
             self.assertEqual(faces[0].opacity, 0)
             self.assertEqual(len(effect.calls), calls)
             self.step(faces, effect, 10.6, [detection()])
-            self.assertEqual(effect.calls[-1], (0, 0.1))
+            self.assertAlmostEqual(effect.calls[-1][1], 1.0)   # back immediately, at 24 in
             self.assertEqual(len(effect.calls), calls+1)
             self.step(faces, effect, 11.2)
             self.assertEqual(faces, {})
@@ -202,6 +249,7 @@ class AcceptanceTests(unittest.TestCase):
     def test_no_fade_activates_immediately_at_full_opacity(self):
         with patch.object(system, "USE_FADE_IN", False):
             face = system.Face(0)
+            face.distance = 29.5   # in the fading band, but fading is off
             system.update_opacity(face, True, 10, 0.001)
             self.assertEqual(face.opacity, 1)
 
@@ -214,18 +262,8 @@ class AcceptanceTests(unittest.TestCase):
             self.assertEqual({fid for fid, _ in effect.calls}, {0})
             self.step(faces, effect, 10.5, [first, second])
             self.assertEqual({fid for fid, _ in effect.calls}, {0, 1})
-            self.assertAlmostEqual(faces[0].opacity, 1)
-            self.assertEqual(faces[1].opacity, 0.1)
-
-    def test_sensor_distance_uses_the_same_zone(self):
-        for actual in self.filters:
-            faces, effect = {}, RecordingFilter(actual)
-            for now in np.linspace(10, 13.1, 32):
-                self.step(faces, effect, float(now), [detection(60)], sensor=30)
-            self.assertTrue(effect.calls)
-            calls = len(effect.calls)
-            self.step(faces, effect, 13.2, [detection(60)], sensor=31)
-            self.assertEqual(len(effect.calls), calls)
+            self.assertAlmostEqual(faces[0].opacity, 0.46, places=4)   # 28 in: partway faded
+            self.assertAlmostEqual(faces[1].opacity, 1, places=4)      # 24 in: fully visible
 
     def test_tracking_and_resizing_five_feet_to_six_inches_five_trials(self):
         nose = ClownNoseFilter()
@@ -260,7 +298,10 @@ class AcceptanceTests(unittest.TestCase):
                     det = detection(60, (320+angle, 240), roll=angle, yaw=angle)
                     self.step(faces, effect, 10+index*0.1, [det])
                     np.testing.assert_allclose(faces[0].nose, det[0][8:10], atol=1e-6)
-                    self.assertAlmostEqual(faces[0].distance, 60, places=4)
+                    # detection() turns faces with a flat (not perspective) squash, so a face that is
+                    # both turned and off-centre isn't exactly 60 in to the real-camera formula.
+                    # test_distance_is_exact_off_centre_turned_and_tilted covers exactness.
+                    self.assertAlmostEqual(faces[0].distance, 60, delta=60 * 0.03)
                     # Direct rendering checks the attachment while normal processing is hidden.
                     frame = np.zeros((480, 640, 3), np.uint8)
                     ClownNoseFilter().apply(frame, faces[0], 1)
@@ -318,7 +359,7 @@ class AcceptanceTests(unittest.TestCase):
         for actual in self.filters:
             faces, effect = {}, RecordingFilter(actual)
             for now in np.linspace(10, 13.1, 32):
-                frame, _ = self.step(faces, effect, float(now), [detection(6, (320, 350))])
+                frame, _ = self.step(faces, effect, float(now), [detection(6, (320, 270))])  # chin off screen
             self.assertTrue(effect.calls)
             self.assertFalse(np.all(frame == 140))
 

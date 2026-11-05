@@ -16,8 +16,10 @@ the filter on screen asks for (switching automatically when the filters take tur
 If MediaPipe isn't available, YuNet is used for compatible filters; iris filters are skipped.
 TRACKER below can force one tracker for everything.
 
-Opt-in zone: on a Raspberry Pi with the ultrasonic sensor wired up (see the wiring notes below),
-distance comes from the sensor. Anywhere else it's estimated from the size of the face.
+Opt-in zone: distance comes from how far apart the eyes look on camera (see estimate_distance).
+Filters show at 30 inches or closer: fully visible at 25 inches, fading out toward 30.
+Set it up once with a tape measure: stand with your eyes exactly 30 inches from the camera,
+look at the screen, and press z (or "Set 30-inch distance" in the staff controls).
 
 Dashboard: the camera fills a full-screen web page (common/dashboard/). A small filter wheel sits
 at the bottom: tap it to open it, spin it or tap a slice to pick a filter. A picked filter stays
@@ -31,6 +33,7 @@ once to go full screen). The page is only reachable from this computer. Staff co
 Keys (in the dashboard page or the --window window):
        n = next filter   d = debug view (distance, head angles, FPS -- for calibrating)
        c = calibrate "looking forward": look straight at the screen and press c (saved for next time)
+       z = set the 30-inch distance: eyes exactly 30 inches from the camera, then press z (saved)
        f = full screen, left/right arrows = turn the wheel (dashboard only)
 Window only:  q = quit   l = start/stop recording head angles to common/pose_log.csv
 In dashboard mode, stop the program with Ctrl+C in the terminal.
@@ -41,7 +44,10 @@ How a filter plugs in (see viraj/emoji_filter.py for an example):
   - Optionally set `tracker = "mediapipe"` on the class (the default is "yunet").
   - Add it to FILTERS below.
   - Filters only draw. This file decides who gets a filter, so every filter gets the same
-    opt-in zone, fade-in, timer, and multi-user behaviour.
+    opt-in zone, fade, timer, and multi-user behaviour.
+
+Packages: anything missing (OpenCV, NumPy, MediaPipe, moderngl) is installed automatically the
+first time this runs (see installer.py).
 
 Camera frames are never saved. Calibration and optional numeric pose logs are stored locally.
 """
@@ -58,12 +64,15 @@ import time
 import urllib.request
 from datetime import datetime, time as dtime
 
-import cv2
-import numpy as np
-
 COMMON_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(COMMON_DIR))   # repo root, so "viraj.emoji_filter" imports
 sys.path.insert(1, COMMON_DIR)                     # so "dashboard_server" imports
+
+from installer import ensure_packages  # noqa: E402
+ensure_packages()   # installs OpenCV, NumPy, MediaPipe... the first time, if they're missing
+
+import cv2  # noqa: E402
+import numpy as np  # noqa: E402
 
 MODEL_PATH = os.path.join(COMMON_DIR, "face_detection_yunet_2023mar.onnx")
 MODEL_URL = ("https://github.com/opencv/opencv_zoo/raw/main/models/"
@@ -85,14 +94,14 @@ FILTER_ALIASES = {"astronaut": "helmet"}
 # --- Feature toggles (True = on, False = off) ---
 USE_OPT_IN_ZONE = True    # only people at or closer than ZONE_ENTER_INCHES get a filter
 USE_ANGLE_LIMIT = True    # stop drawing past MAX_ANGLE, independently for each person
-USE_FADE_IN = True        # appear immediately at 0.1, then fade in (off = fully visible immediately)
+USE_FADE_IN = True        # fade by distance between FADE_FULL_INCHES and ZONE_ENTER_INCHES
+                          # (off = fully visible anywhere in the zone)
 USE_TIMER = True          # 1 minute note and 3 minute reminder
 USE_MULTI_USER = True     # everyone in view gets a filter (off = only the closest person)
 USE_ENGAGEMENT = True     # rotate between filters every FILTER_SWITCH_SECONDS ('n' still works when off)
-USE_SCHEDULE = True        # filters turn off at FILTERS_OFF_AT (computer's local time)
+USE_SCHEDULE = True       # filters turn off at FILTERS_OFF_AT (computer's local time). Set to False
+                          # for after-school events like showcases
 USE_HINT_TEXT = True      # "Step up close..." message when nobody is using a filter
-USE_ULTRASONIC = True     # on a Raspberry Pi, measure the opt-in zone with an ultrasonic sensor
-                          # (ignored on other computers, which use the camera estimate instead)
 
 # --- Settings (keep in sync with constraints.md) ---
 TRACKER = None            # None = whatever each filter asks for, or "mediapipe" / "yunet" to force one
@@ -105,48 +114,22 @@ NEW_FACE_EVERY = 3        # while someone's being tracked, scan the whole pictur
 SEARCH_ANGLES = (40, -40, 80, -80, 130, -130, 180)   # tilts tried when nobody is in view (YuNet)
 MEDIAPIPE_MAX_FACES = 8   # each extra face costs time on the Pi
 
-# Opt-in zone. On a Raspberry Pi with the ultrasonic sensor, distance comes from the sensor.
-# Otherwise it's estimated from how far apart the eyes look on screen.
+# Opt-in zone. Distance comes from how far apart the eyes look on screen (see estimate_distance).
 FOCAL_PX = 600            # camera focal length in pixels for a 640-wide picture (scaled to the real
-                          # width automatically) -- calibrate with the 'd' debug view
-EYE_GAP_INCHES = 2.5      # average distance between a person's eyes
-ZONE_ENTER_INCHES = 30    # at or closer than this (2.5 ft) to opt in
-# Ultrasonic sensor (Raspberry Pi only). An HC-SR04 sends out a click of sound and times the echo,
-# which measures distance far more accurately than guessing from the size of a face on camera.
-#
-# WIRING (HC-SR04 -> Raspberry Pi 40-pin header; pin numbers are the physical pin numbers):
-#
-#     HC-SR04 VCC  ->  pin 2  (5V)
-#     HC-SR04 GND  ->  pin 6  (GND)
-#     HC-SR04 TRIG ->  pin 16 (GPIO 23)        direct wire is fine (the Pi sends 3.3V, the sensor accepts it)
-#     HC-SR04 ECHO ->  1k ohm resistor ->  pin 18 (GPIO 24)
-#                                     |
-#                                     +->  2k ohm resistor ->  pin 14 (GND)
-#
-#   ECHO sends back 5V, which can damage the Pi's 3.3V pins. The 1k + 2k resistors form a
-#   voltage divider that drops it to ~3.3V. (No 2k? Two 1k in series works. A 3.3V-only
-#   "HC-SR04P" sensor powered from pin 1 doesn't need the resistors.)
-#
-#   Mount the sensor right next to the camera, pointing the same way, at about chest-to-face
-#   height. It measures the closest thing in a ~15 degree cone in front of it, so keep walls and
-#   furniture out of that cone (or farther away than ZONE_ENTER_INCHES).
-#
-#   Software: gpiozero comes with Raspberry Pi OS. If it's missing: sudo apt install python3-gpiozero
-#   (if you use a virtual environment, create it with --system-site-packages so it can see gpiozero).
-SENSOR_TRIGGER_GPIO = 23
-SENSOR_ECHO_GPIO = 24
-SENSOR_MAX_INCHES = 120   # readings past this count as "nobody there"
+                          # width automatically). Used for head angles and people off to the side
+EYE_GAP_INCHES = 2.5      # average distance between a person's eyes (only used until you press z)
+ZONE_ENTER_INCHES = 30    # filters show at or closer than this (2.5 ft)...
+FADE_FULL_INCHES = 25     # ...fully visible at or closer than this, fading out from here to 30 in
+FADE_START = 0.1          # opacity right at the edge of the zone (30 in)
+ZONE_CALIBRATE_SECONDS = 1.5   # pressing z averages the eye gap over this long
 
-MAX_ANGLE = 60            # inclusive on each axis: allow a 45-degree tilt and a 60-degree turn;
-                          # reject a perpendicular/profile (90-degree) passerby immediately
+MAX_ANGLE = 60            # filters show up to and including 60 degrees on every axis (turn, nod,
+                          # tilt) and stop past that, e.g. a passerby in profile (90 degrees)
 
 # Smoothing for motion diagnostics; drawing uses current-frame geometry to avoid lag.
 STILL_SMOOTHING = 1.0     # lower = steadier when still, but more lag (try 0.5 to 2)
 MOVING_RESPONSE = 5.0     # higher = catches up faster when you move (try 2 to 10)
 
-# Fade-in begins on the first eligible detection, with no waiting period.
-FADE_START = 0.1          # first visible opacity
-FADE_IN_SECONDS = 0.4     # time to go from FADE_START to fully visible
 
 # Timer
 TIMER_GENTLE_SECONDS = 60     # small note that a minute has passed
@@ -176,6 +159,7 @@ def filters_are_off(local_now=None) -> bool:
 # them; they're saved to calibration.json (separately for YuNet and MediaPipe) and loaded every time.
 CALIBRATION_PATH = os.path.join(COMMON_DIR, "calibration.json")
 FORWARD = {"yaw": 0.0, "pitch": 0.0}
+DISTANCE_K = None         # eye gap in pixels x inches, measured by pressing z (None = use the averages)
 POSE_LOG_PATH = os.path.join(COMMON_DIR, "pose_log.csv")
 
 
@@ -425,6 +409,9 @@ def load_calibration():
             angles = {axis: float(values.get(axis, 0)) for axis in ("yaw", "pitch")}
             if all(math.isfinite(v) and abs(v) <= 90 for v in angles.values()):
                 clean[tracker] = angles
+                k = float(values.get("distance_k", 0) or 0)
+                if math.isfinite(k) and k > 0:
+                    clean.setdefault(tracker, {})["distance_k"] = k
         return clean
     except (OSError, ValueError, TypeError) as error:
         print(f"Ignoring invalid calibration ({error}); press c to recalibrate.")
@@ -560,7 +547,7 @@ def open_camera(index=None):
     return fallback or Camera(0)
 
 
-# --- Ultrasonic sensor (opt-in zone on the Raspberry Pi) ---
+# --- Raspberry Pi ---
 def is_raspberry_pi() -> bool:
     """True when running on a Raspberry Pi (it writes its model name to this file)."""
     try:
@@ -568,58 +555,6 @@ def is_raspberry_pi() -> bool:
             return "raspberry pi" in f.read().lower()
     except OSError:
         return False
-
-
-class UltrasonicSensor:
-    """HC-SR04 distance sensor. gpiozero pings it on a background thread and averages the
-    last few readings, so reading it costs nothing in the main loop. See the wiring above."""
-
-    def __init__(self):
-        from gpiozero import DistanceSensor   # only exists on the Pi, so imported here
-        self.sensor = DistanceSensor(echo=SENSOR_ECHO_GPIO, trigger=SENSOR_TRIGGER_GPIO,
-                                     max_distance=SENSOR_MAX_INCHES * 0.0254)
-
-    def inches(self) -> float:
-        return self.sensor.distance / 0.0254   # gpiozero reports meters
-
-    def close(self):
-        self.sensor.close()
-
-
-def start_sensor():
-    """The sensor on a Raspberry Pi (if turned on and wired up), otherwise None."""
-    if not USE_ULTRASONIC or not is_raspberry_pi():
-        return None
-    try:
-        sensor = UltrasonicSensor()
-        print(f"Ultrasonic sensor on: {sensor.inches():.0f} in to the closest thing in front of it.")
-        return sensor
-    except Exception as e:
-        print(f"Ultrasonic sensor not working ({e}); using the camera to estimate distance instead.")
-        return None
-
-
-def read_sensor(sensor):
-    """Bad/disconnected sensor readings fall back to this frame's camera estimate."""
-    if sensor is None or not USE_ULTRASONIC:
-        return None
-    try:
-        inches = sensor.inches()
-        return inches if inches is not None and math.isfinite(inches) and 0 < inches <= SENSOR_MAX_INCHES else None
-    except (OSError, RuntimeError, ValueError):
-        return None
-
-
-def apply_sensor_distance(faces: list, sensor_inches: float) -> None:
-    """The sensor measures one thing: how far away the closest person is. That's the closest
-    (biggest) face, so it gets the sensor's distance. Everyone else gets their camera estimate
-    corrected by the same amount, which also fixes any error in FOCAL_PX."""
-    if not faces or not math.isfinite(sensor_inches) or not 0 < sensor_inches <= SENSOR_MAX_INCHES:
-        return
-    closest = max(faces, key=lambda f: f.size)
-    correction = sensor_inches / max(closest.camera_distance, 1.0)
-    for f in faces:
-        f.distance = f.camera_distance * correction
 
 
 # --- Face data handed to every filter ---
@@ -642,7 +577,6 @@ class Face:
         self.size = 0.0
         self.roll = self.yaw = self.pitch = 0.0
         self.distance = 999.0
-        self.camera_distance = 999.0   # distance guessed from face size (main loop may replace .distance with the sensor's)
         self.speed = 0.0        # face widths per second
         # system state (filters don't need these)
         self.point_filter = Smoother()
@@ -653,7 +587,6 @@ class Face:
         self.raw_yaw = self.raw_pitch = 0.0   # this frame's measurement, before calibration and smoothing
         self.last_seen = 0.0
         self.opted_in = False
-        self.fade_start = None
         self.opacity = 0.0
         self.session_start = None
         self.last_eligible = 0.0
@@ -759,6 +692,56 @@ def face_size(p: np.ndarray, yaw: float, pitch: float) -> float:
     return eye_dist / cos_yaw
 
 
+def frontal_eye_gap(p: np.ndarray, yaw: float, frame_size: tuple) -> float:
+    """How wide, in pixels, the eye gap would look if the head faced the camera from where it is.
+
+    Pinhole camera, focal length f, picture centre c. For eyes at depth Z along the ray
+    r = (point - c) / f, an eye-line vector d (|d| = G inches) shows up on screen as
+        g = f / Z * (d_xy - d_z * r)
+    A head turned by yaw has |d_xy| = G cos(yaw) and d_z = G sin(yaw), taking d from the eye on the
+    left of the screen to the eye on the right (positive yaw = turned toward screen right, so the
+    right-hand eye is the farther one). Writing k = f * G / Z (the answer), |g / k + sin(yaw) r| = cos(yaw):
+        |g|^2 t^2 + 2 sin(yaw) (g . r) t + sin(yaw)^2 |r|^2 - cos(yaw)^2 = 0,   k = 1 / t
+    With yaw = 0 this is just |g|; straight ahead of the camera it's |g| / cos(yaw)."""
+    w, h = frame_size
+    g = p[3] - p[2]
+    if g[0] < 0:   # point it left to right on screen (tilts are limited to 60 degrees)
+        g = -g
+    gg = max(float(g @ g), 1.0)
+    r = ((p[2] + p[3]) / 2 - (w / 2, h / 2)) / FOCAL_PX
+    turn = math.radians(max(-60.0, min(60.0, yaw))) if math.isfinite(yaw) else 0.0   # past 60 never shows
+    sin_t, cos_t = math.sin(turn), math.cos(turn)
+    gr = float(g @ r)
+    t = (-sin_t * gr + math.sqrt(max((sin_t * gr) ** 2 - gg * (sin_t ** 2 * float(r @ r) - cos_t ** 2), 0.0))) / gg
+    return 1.0 / t if t > 0 else math.sqrt(gg)
+
+
+def off_axis(p: np.ndarray, frame_size: tuple) -> float:
+    """How much farther someone is than their depth, because they're off to the side or up/down:
+    a point (dx, dy) pixels from the middle of the picture is depth * sqrt(1 + (dx/f)^2 + (dy/f)^2) away."""
+    w, h = frame_size
+    mid = (p[2] + p[3]) / 2   # halfway between the eyes
+    return math.hypot((mid[0] - w / 2) / FOCAL_PX, (mid[1] - h / 2) / FOCAL_PX, 1.0)
+
+
+def estimate_distance(p: np.ndarray, raw_yaw: float, frame_size: tuple) -> float:
+    """Inches from the camera to the point between the eyes.
+
+    An eye gap G inches wide at depth Z looks k = f * G / Z pixels wide when facing the camera
+    (frontal_eye_gap undoes a head turn), so Z = (f * G) / k and the distance is Z * off_axis.
+    Pressing z measures K = f * G directly with someone standing exactly ZONE_ENTER_INCHES away,
+    which makes the zone edge exact for this camera, its settings and this tracker. Before that,
+    the average eye gap and FOCAL_PX are used."""
+    k = DISTANCE_K or FOCAL_PX * EYE_GAP_INCHES
+    return k / frontal_eye_gap(p, raw_yaw, frame_size) * off_axis(p, frame_size)
+
+
+def distance_k_sample(face, frame_size: tuple, inches: float = None) -> float:
+    """K for someone standing exactly `inches` away (estimate_distance run backwards)."""
+    inches = ZONE_ENTER_INCHES if inches is None else inches
+    return frontal_eye_gap(face.points, face.raw_yaw, frame_size) * inches / off_axis(face.points, frame_size)
+
+
 def update_face(face: Face, det: np.ndarray, tilt, pose, now: float, frame_size: tuple, landmarks=None) -> None:
     dt = now - face.last_seen if face.points is not None else 0.0
     scale = max(face.size, 1.0)
@@ -795,8 +778,7 @@ def update_face(face: Face, det: np.ndarray, tilt, pose, now: float, frame_size:
     # Use current geometry for all renderers: smoothing scale/anchors leaves an uncovered
     # nose on an approach and trails behind a head sway, especially at close distances.
     face.size = face_size(face.points, face.raw_yaw, face.raw_pitch)
-    face.camera_distance = FOCAL_PX * EYE_GAP_INCHES / face.size
-    face.distance = face.camera_distance
+    face.distance = estimate_distance(face.points, face.raw_yaw, frame_size)
     face.last_seen = now
 
 
@@ -833,8 +815,8 @@ def is_eligible(face: Face, frame_w: int, frame_h: int) -> bool:
     if not math.isfinite(face.distance) or face.distance <= 0:
         return False
     # Landmark rows are float32; do not reject an exact boundary because of
-    # sub-pixel arithmetic (the tolerance is only one hundred-thousandth inch).
-    if USE_OPT_IN_ZONE and face.distance > ZONE_ENTER_INCHES + 1e-5:
+    # sub-pixel arithmetic (the tolerance is only a thousandth of an inch).
+    if USE_OPT_IN_ZONE and face.distance > ZONE_ENTER_INCHES + 1e-3:
         return False
     if USE_ANGLE_LIMIT and not within_angle_limit(face):
         return False
@@ -842,11 +824,23 @@ def is_eligible(face: Face, frame_w: int, frame_h: int) -> bool:
     return 0 <= nx < frame_w and 0 <= ny < frame_h
 
 
-# --- Fade-in ---
-# Start at exactly 0.1 on the first eligible frame; revoke immediately on exit or cutoff.
+# --- Fade ---
+# Opacity comes from distance: fully visible at FADE_FULL_INCHES or closer, fading to FADE_START at
+# the edge of the zone and gone past it. Leaving the zone or turning away hides it immediately.
+def zone_opacity(distance: float) -> float:
+    if not USE_OPT_IN_ZONE:
+        return 1.0
+    # (a thousandth of an inch of slack, so float rounding can't reject someone standing on the line)
+    if not math.isfinite(distance) or distance <= 0 or distance > ZONE_ENTER_INCHES + 1e-3:
+        return 0.0
+    if not USE_FADE_IN or distance <= FADE_FULL_INCHES:
+        return 1.0
+    edge = min(1.0, (ZONE_ENTER_INCHES - distance) / (ZONE_ENTER_INCHES - FADE_FULL_INCHES))
+    return FADE_START + (1 - FADE_START) * max(0.0, edge)
+
+
 def reset_activation(face: Face) -> None:
     face.opted_in = False
-    face.fade_start = None
     face.opacity = 0.0
 
 
@@ -854,13 +848,9 @@ def update_opacity(face: Face, eligible: bool, now: float, dt: float) -> None:
     if not eligible:
         reset_activation(face)
         return
-    if not face.opted_in:
-        face.opted_in = True
-        face.fade_start = now   # don't charge this frame's elapsed dt to the first fade step
+    face.opted_in = True
     face.last_eligible = now
-    elapsed = max(0.0, now - face.fade_start)
-    face.opacity = (min(1.0, FADE_START + elapsed * (1 - FADE_START) / FADE_IN_SECONDS)
-                    if USE_FADE_IN else 1.0)
+    face.opacity = zone_opacity(face.distance)
 
 
 # --- Timer ---
@@ -898,8 +888,8 @@ def draw_debug(frame, face: Face) -> None:
               x + w / 2, y + h + 20, 0.4, color)
 
 
-def process_faces(frame, faces, filters, active, now, dt, filters_off=None, sensor_inches=None, draw_notes=True):
-    """Shared opt-in, sensor correction, multi-user, angle gate, fade and timer.
+def process_faces(frame, faces, filters, active, now, dt, filters_off=None, draw_notes=True):
+    """Shared opt-in, multi-user, angle gate, fade and timer.
 
     Filters draw only. Every registered filter passes through these same rules.
     Returns (faces seen this frame, firm reminder, anyone has a filter, gentle note showing).
@@ -910,9 +900,6 @@ def process_faces(frame, faces, filters, active, now, dt, filters_off=None, sens
     # Multi-user off: only the closest person (biggest face) can get a filter
     seen_faces = [f for f in faces.values() if f.last_seen == now]
     closest = max(seen_faces, key=lambda f: f.size).id if seen_faces else None
-    # Opt-in zone on the Pi: use the ultrasonic sensor's distance instead of the camera's guess
-    if USE_ULTRASONIC and sensor_inches is not None:
-        apply_sensor_distance(seen_faces, sensor_inches)
 
     firm = gentle = anyone = False
     for face in list(faces.values()):
@@ -937,21 +924,22 @@ def process_faces(frame, faces, filters, active, now, dt, filters_off=None, sens
 
 
 # --- Main camera loop ---
-KEY_ACTIONS = {ord('n'): "next", ord('d'): "debug", ord('c'): "calibrate", ord('l'): "log"}
+KEY_ACTIONS = {ord('n'): "next", ord('d'): "debug", ord('c'): "calibrate", ord('z'): "zone", ord('l'): "log"}
 
 
-def save_calibration(saved: dict) -> None:
+def save_calibration(saved: dict, what: str = None) -> None:
+    what = what or f"Calibrated looking forward: yaw {FORWARD['yaw']}, pitch {FORWARD['pitch']}"
     try:
         with open(CALIBRATION_PATH + ".part", "w") as out:
             json.dump(saved, out, indent=2)
         os.replace(CALIBRATION_PATH + ".part", CALIBRATION_PATH)
-        print(f"Calibrated looking forward: yaw {FORWARD['yaw']}, pitch {FORWARD['pitch']} (saved)")
+        print(f"{what} (saved)")
     except OSError as error:
         print(f"Calibration active for this session; could not save it: {error}")
 
 
 def main(argv=None):
-    global FOCAL_PX, MEDIAPIPE_MAX_FACES
+    global FOCAL_PX, MEDIAPIPE_MAX_FACES, DISTANCE_K
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("filters", nargs="*", help="Available: " + ", ".join(FILTERS) +
                         " (astronaut is an alias for helmet)")
@@ -974,14 +962,11 @@ def main(argv=None):
     tracker = None
     saved = load_calibration()  # "looking forward" calibration, one per tracker
 
-    sensor = start_sensor()
     cam = open_camera(args.camera)
     if not cam.running:
         print("Error: Could not open a camera. Check it's plugged in (unplug and replug a USB webcam),\n"
               "and that no other program is using it. On a Pi, `rpicam-hello` tests a camera module.")
         cam.release()
-        if sensor:
-            sensor.close()
         return 1
 
     dashboard = None
@@ -992,8 +977,6 @@ def main(argv=None):
         except OSError as error:
             print(f"Error: could not start the dashboard ({error}). Try --window.")
             cam.release()
-            if sensor:
-                sensor.close()
             return 1
         print(f"Dashboard: {dashboard.url}  (Ctrl+C to stop)")
         if not args.no_browser:
@@ -1013,6 +996,8 @@ def main(argv=None):
     fps = 0.0
     nobody_since = time.monotonic()   # taking turns starts again once everyone has left
     focal_set = False
+    zone_cal = None           # pressing z: eye-gap samples from someone exactly 30 inches away
+    zone_note = ""
 
     try:
         while True:
@@ -1060,19 +1045,34 @@ def main(argv=None):
                         if hasattr(f, "forget"):
                             f.forget(face_id)
                 faces.clear()
-                FORWARD.update(yaw=0.0, pitch=0.0)
-                FORWARD.update(saved.get(tracker, {}))
+                mine = saved.get(tracker, {})
+                FORWARD.update(yaw=mine.get("yaw", 0.0), pitch=mine.get("pitch", 0.0))
+                DISTANCE_K = mine.get("distance_k")
 
             tracked = [(f.nose, f.tilt, f.size) for f in faces.values()]
             track(faces, detector.detect(frame, tracked), now, next_id, (w, h))
-            sensor_inches = read_sensor(sensor)
             # Check after inference: a slow detector may have crossed dismissal time.
             filters_off = filters_are_off()
             # In dashboard mode the page shows the notes and reminders in its own type, so the
             # picture stays clean. The --window view draws them onto the frame like before.
             draw_notes = dashboard is None
             seen_faces, firm, anyone, gentle = process_faces(
-                frame, faces, filters, active, now, dt, filters_off, sensor_inches, draw_notes)
+                frame, faces, filters, active, now, dt, filters_off, draw_notes)
+            # Setting the 30-inch distance: average the closest person's eye gap for a moment
+            if zone_cal is not None:
+                if seen_faces:
+                    closest = max(seen_faces, key=lambda f: f.size)
+                    zone_cal["samples"].append(distance_k_sample(closest, (w, h)))
+                if now >= zone_cal["until"]:
+                    if len(zone_cal["samples"]) >= 5:
+                        DISTANCE_K = float(np.median(zone_cal["samples"]))
+                        saved.setdefault(tracker, {})["distance_k"] = round(DISTANCE_K, 3)
+                        save_calibration(saved, f"Set the {ZONE_ENTER_INCHES}-inch distance for {tracker}")
+                        zone_note = f"Done: {ZONE_ENTER_INCHES} inches is set"
+                    else:
+                        zone_note = "Couldn't see a face. Stand 30 in away, look at the screen, try again"
+                        print(zone_note)
+                    zone_cal = None
             # Someone picked a filter on the screen: it stays until everyone has left for a while,
             # then the filters go back to taking turns for the next people.
             if seen_faces:
@@ -1083,8 +1083,7 @@ def main(argv=None):
             if debug:
                 for face in faces.values():
                     draw_debug(frame, face)
-                sensor_text = f"  sensor {sensor_inches:.0f}in" if sensor_inches is not None else ""
-                draw_text(frame, f"Filter: {active.name}  {fps:.0f} FPS{sensor_text}", 140, 20, 0.5, (255, 255, 0))
+                draw_text(frame, f"Filter: {active.name}  {fps:.0f} FPS", 140, 20, 0.5, (255, 255, 0))
 
             # --- Show the frame, then collect what people asked for ---
             actions = []
@@ -1099,7 +1098,9 @@ def main(argv=None):
                         "hint": USE_HINT_TEXT and not anyone and not filters_off,
                         "gentle": gentle, "firm": firm, "off": filters_off,
                         "people": len(seen_faces), "debug": debug, "fps": round(fps),
+                        "empty_for": 0.0 if seen_faces else round(now - nobody_since, 1),   # seconds nobody's been in view
                         "tracker": "MediaPipe" if "MediaPipe" in tracker else "YuNet",
+                        "zone_note": zone_note,
                     }
                 actions = list(dashboard.pending())
             else:
@@ -1109,6 +1110,9 @@ def main(argv=None):
                     draw_text(frame, "Filters are off for the day", w / 2, h - 16, 0.5, (200, 200, 200))
                 elif USE_HINT_TEXT and not anyone:
                     draw_text(frame, "Step up close and look here to try a filter", w / 2, h - 16, 0.5, (255, 255, 255))
+                draw_text(frame, "This camera doesn't record: pictures never leave this computer and are never saved.",
+                          w / 2, h - 52, 0.42, (255, 255, 255))
+                draw_text(frame, "To stay off the screen, step out of the camera's view.", w / 2, h - 36, 0.42, (255, 255, 255))
                 cv2.imshow("Hallway Filter", frame)
                 key = cv2.waitKey(1) & 0xFF
                 if key in (ord('q'), 27) or cv2.getWindowProperty("Hallway Filter", cv2.WND_PROP_VISIBLE) < 1:
@@ -1130,8 +1134,11 @@ def main(argv=None):
                     # whoever is closest is looking straight at the screen right now
                     f = max(seen_faces, key=lambda f: f.size)
                     FORWARD.update(yaw=round(f.raw_yaw, 1), pitch=round(f.raw_pitch, 1))
-                    saved[tracker] = dict(FORWARD)
+                    saved.setdefault(tracker, {}).update(FORWARD)
                     save_calibration(saved)
+                elif action == "zone":
+                    zone_cal = {"until": now + ZONE_CALIBRATE_SECONDS, "samples": []}
+                    zone_note = "Measuring... hold still"
                 elif action == "debug":
                     debug = not debug
                     for f in filters:
@@ -1166,8 +1173,6 @@ def main(argv=None):
             dashboard.close()
         if log_file:
             log_file.close()
-        if sensor:
-            sensor.close()
         for detector in detectors.values():
             if hasattr(detector, "close"):
                 detector.close()

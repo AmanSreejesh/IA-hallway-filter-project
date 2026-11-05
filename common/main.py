@@ -127,9 +127,10 @@ FADE_START = 0.1          # opacity right at the edge of the zone (30 in)
 ZONE_CALIBRATE_SECONDS = 1.5   # pressing z averages the eye gap over this long
 # Each person's own eye gap, measured against their iris (MediaPipe only; YuNet uses the average)
 IRIS_MM = 11.7            # width of the coloured part of the eye: about the same in everyone over ~3
-IRIS_MIN_SAMPLES = 10     # good frames needed before a person's own eye gap replaces the average
-IRIS_MAX_TURN = 20        # only measure when the head faces the camera within this many degrees...
-IRIS_MAX_SPEED = 1.0      # ...isn't moving faster than this (face widths per second, blur)...
+IRIS_MIN_SAMPLES = 4      # good frames needed before a person's own eye gap replaces the average
+                          # (it keeps getting more exact with every good frame after that)
+IRIS_MAX_TURN = 25        # only measure when the head is turned left/right less than this...
+IRIS_MAX_SPEED = 2.0      # ...isn't moving faster than this (face widths per second, blur)...
 IRIS_MIN_PX = 5           # ...and the iris is at least this many pixels wide
 
 MAX_ANGLE = 60            # filters show up to and including 60 degrees on every axis (turn, nod,
@@ -772,26 +773,24 @@ def iris_sample(face, frame_size: tuple):
 
     The iris is about IRIS_MM wide in everyone, so eye gap = IRIS_MM * (eye gap px / iris px).
     Both are measured in the same frame, so walking toward or away from the camera cancels out.
-    Frames are skipped when the head is turned, the eyes look sideways (the iris then looks
-    narrower), the face is moving fast (blur), or the iris is too small to measure."""
+    Only the iris's side-to-side width is used: looking up or down (at a screen below the camera,
+    say) squashes it top to bottom but not side to side. Frames are skipped when the head is
+    turned left/right, the eyes look sideways (the iris then looks narrower), the face is moving
+    fast (blur), or the iris is too small to measure."""
     lm = face.landmarks
     if lm is None or lm.shape != (478, 2) or not np.isfinite(lm).all():
         return None
-    if not (math.isfinite(face.raw_yaw) and math.isfinite(face.raw_pitch)):
-        return None
-    if max(abs(face.raw_yaw), abs(face.raw_pitch)) > IRIS_MAX_TURN or face.speed > IRIS_MAX_SPEED:
+    if not math.isfinite(face.raw_yaw) or abs(face.raw_yaw) > IRIS_MAX_TURN or face.speed > IRIS_MAX_SPEED:
         return None
     widths = []
-    for centre, across, down, (corner_a, corner_b) in IRIS_EYES:
+    for centre, across, _, (corner_a, corner_b) in IRIS_EYES:
         axis = lm[corner_b] - lm[corner_a]
         length = float(axis @ axis)
         if length < 1.0:
             return None
         if not 0.38 <= float((lm[centre] - lm[corner_a]) @ axis) / length <= 0.62:
             return None   # looking sideways (the iris would look narrower)
-        # Average both ways across: taking the larger of two noisy widths would read too big
-        widths.append((float(np.linalg.norm(lm[across[0]] - lm[across[1]])) +
-                       float(np.linalg.norm(lm[down[0]] - lm[down[1]]))) / 2)
+        widths.append(float(np.linalg.norm(lm[across[0]] - lm[across[1]])))
     iris_px = sum(widths) / len(widths)
     if iris_px < IRIS_MIN_PX:
         return None
@@ -960,7 +959,8 @@ def draw_debug(frame, face: Face) -> None:
     x, y, w, h = (int(v) for v in face.box)
     color = (0, 255, 0) if face.opted_in else (0, 0, 255)
     cv2.rectangle(frame, (x, y), (x + w, y + h), color, 1)
-    draw_text(frame, f"#{face.id} {face.distance:.0f}in yaw{face.yaw:.0f} pitch{face.pitch:.0f} roll{face.roll:.0f}",
+    draw_text(frame, f"#{face.id} {face.distance:.1f}in  filter {face.opacity * 100:.0f}%  "
+                     f"yaw{face.yaw:.0f} pitch{face.pitch:.0f} roll{face.roll:.0f}",
               x + w / 2, y + h + 20, 0.4, color)
     eyes = f"eye gap {face.eye_gap * 25.4:.0f}mm (measured)" if face.eye_gap else \
         f"eye gap {EYE_GAP_INCHES * 25.4:.0f}mm (average, measuring {len(face.iris_samples)}/{IRIS_MIN_SAMPLES})"

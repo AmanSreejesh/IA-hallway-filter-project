@@ -471,6 +471,40 @@ class Camera:
             self.thread.join(1.0)
         self.cap.release()
 
+    def shows_picture(self, seconds=3.0):
+        """True once a frame isn't pure black. Some cameras (like an iPhone the Mac picked up
+        as a Continuity Camera) open fine but only ever send black frames."""
+        end = time.time() + seconds
+        while self.running and time.time() < end:
+            frame = self.read()
+            if frame is not None and frame.max() > 30:
+                return True
+        return False
+
+
+def open_camera(index=None):
+    """Open the camera at index, or if none was asked for, the first one that shows a picture."""
+    if index is not None:
+        return Camera(index)
+    fallback = None
+    for i in range(4):
+        cam = Camera(i)
+        if not cam.running:
+            cam.release()
+            continue
+        if cam.shows_picture():
+            if i:
+                print(f"Using camera {i} (the ones before it only sent black frames).")
+            if fallback:
+                fallback.release()
+            return cam
+        print(f"Camera {i} is only sending black frames, trying the next one...")
+        if fallback:
+            cam.release()
+        else:
+            fallback = cam
+    return fallback or Camera(0)
+
 
 # --- Ultrasonic sensor (opt-in zone on the Raspberry Pi) ---
 def is_raspberry_pi() -> bool:
@@ -866,7 +900,8 @@ def main(argv=None):
     global FOCAL_PX, MEDIAPIPE_MAX_FACES
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("filters", nargs="*", help="Available: " + ", ".join(FILTERS))
-    parser.add_argument("--camera", type=int, default=0)
+    parser.add_argument("--camera", type=int, default=None,
+                        help="camera number (default: the first one that shows a picture)")
     parser.add_argument("--max-faces", type=int, default=MEDIAPIPE_MAX_FACES)
     parser.add_argument("--focal-px", type=float, default=FOCAL_PX)
     parser.add_argument("--window", action="store_true", help="show an OpenCV window instead of the dashboard")
@@ -885,7 +920,7 @@ def main(argv=None):
     saved = load_calibration()  # "looking forward" calibration, one per tracker
 
     sensor = start_sensor()
-    cam = Camera(args.camera)
+    cam = open_camera(args.camera)
     if not cam.running:
         print("Error: Could not open webcam.")
         cam.release()

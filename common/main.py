@@ -442,26 +442,43 @@ class Camera:
     """
 
     def __init__(self, index=0):
-        backend = cv2.CAP_DSHOW if sys.platform.startswith("win") else cv2.CAP_ANY
+        if sys.platform.startswith("win"):
+            backend = cv2.CAP_DSHOW
+        elif sys.platform.startswith("linux"):
+            backend = cv2.CAP_V4L2   # read the webcam directly; OpenCV's GStreamer route fails on the Pi
+        else:
+            backend = cv2.CAP_ANY
         self.cap = cv2.VideoCapture(index, backend)
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_SIZE[0])
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_SIZE[1])
-        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        if self.cap.isOpened():
+            # MJPG lets USB webcams send 1280x720 at full speed (raw frames are too big for USB 2)
+            self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_SIZE[0])
+            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_SIZE[1])
+            self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        self._start(self.cap.isOpened())
+
+    def _start(self, running):
         self.frame = None
         self.new_frame = threading.Event()
-        self.running = self.cap.isOpened()
+        self.running = running
         self.thread = threading.Thread(target=self._loop, daemon=True)
         if self.running:
             self.thread.start()
 
+    def _grab(self):
+        ok, frame = self.cap.read()
+        return frame if ok else None
+
+    def _close(self):
+        self.cap.release()
+
     def _loop(self):
         try:
             while self.running:
-                ok, frame = self.cap.read()
-                self.frame = frame if ok else None
-                self.running = ok
+                self.frame = self._grab()
+                self.running = self.frame is not None
                 self.new_frame.set()
-        except cv2.error:
+        except Exception:   # cv2.error, or the Pi camera library giving up
             self.frame = None
         finally:
             self.running = False
@@ -478,7 +495,7 @@ class Camera:
         self.running = False
         if self.thread.is_alive():
             self.thread.join(1.0)
-        self.cap.release()
+        self._close()
 
     def shows_picture(self, seconds=3.0):
         """True once a frame isn't pure black. Some cameras (like an iPhone the Mac picked up
@@ -491,8 +508,28 @@ class Camera:
         return False
 
 
+class PiCamera(Camera):
+    """The Raspberry Pi camera module (ribbon cable). OpenCV can't read it, so this uses picamera2."""
+
+    def __init__(self):
+        from picamera2 import Picamera2   # comes with Raspberry Pi OS
+        self.cam = Picamera2()
+        # "RGB888" is stored blue-green-red, which is the order OpenCV wants
+        self.cam.configure(self.cam.create_video_configuration(main={"size": CAMERA_SIZE, "format": "RGB888"}))
+        self.cam.start()
+        self._start(True)
+
+    def _grab(self):
+        return self.cam.capture_array()
+
+    def _close(self):
+        self.cam.stop()
+        self.cam.close()
+
+
 def open_camera(index=None):
-    """Open the camera at index, or if none was asked for, the first one that shows a picture."""
+    """Open the camera at index, or if none was asked for, the first one that shows a picture.
+    On a Raspberry Pi with no working USB webcam, try the ribbon-cable camera module."""
     if index is not None:
         return Camera(index)
     fallback = None
@@ -512,6 +549,16 @@ def open_camera(index=None):
             cam.release()
         else:
             fallback = cam
+    if is_raspberry_pi():
+        if fallback:   # free the camera so picamera2 can have it
+            fallback.release()
+            fallback = None
+        try:
+            cam = PiCamera()
+            print("Using the Raspberry Pi camera module.")
+            return cam
+        except Exception as error:
+            print(f"No Raspberry Pi camera module either ({error}).")
     return fallback or Camera(0)
 
 
@@ -938,7 +985,8 @@ def main(argv=None):
     sensor = start_sensor()
     cam = open_camera(args.camera)
     if not cam.running:
-        print("Error: Could not open webcam.")
+        print("Error: Could not open a camera. Check it's plugged in (unplug and replug a USB webcam),\n"
+              "and that no other program is using it. On a Pi, `rpicam-hello` tests a camera module.")
         cam.release()
         if sensor:
             sensor.close()

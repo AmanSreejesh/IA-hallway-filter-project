@@ -10,7 +10,7 @@ using `helmet.png`. It retains the prototype's proportions and face anchor,
 rotates with the measured head tilt, and scales with head distance and pose.
 The visor remains transparent so the visitor sees their own face.
 
-The shared system owns detection, the 30-inch opt-in zone, 3-second dwell,
+The shared system owns detection, the 30-inch opt-in zone, immediate activation,
 fade from 0.1 opacity, 60-degree angle boundary, multi-user tracking, and
 4:15 p.m. cutoff. There are no separate distance or height restrictions here.
 See [acceptance procedures](../ACCEPTANCE.md).

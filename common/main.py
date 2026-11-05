@@ -84,9 +84,8 @@ FILTER_ALIASES = {"astronaut": "helmet"}
 
 # --- Feature toggles (True = on, False = off) ---
 USE_OPT_IN_ZONE = True    # only people at or closer than ZONE_ENTER_INCHES get a filter
-USE_WALK_BY_CHECK = True  # require a continuous 3-second opt-in; shorter visits never draw
 USE_ANGLE_LIMIT = True    # stop drawing past MAX_ANGLE, independently for each person
-USE_FADE_IN = True        # fade from 0.1 after the shared dwell (off = fully visible after dwell)
+USE_FADE_IN = True        # appear immediately at 0.1, then fade in (off = fully visible immediately)
 USE_TIMER = True          # 1 minute note and 3 minute reminder
 USE_MULTI_USER = True     # everyone in view gets a filter (off = only the closest person)
 USE_ENGAGEMENT = True     # rotate between filters every FILTER_SWITCH_SECONDS ('n' still works when off)
@@ -145,8 +144,7 @@ MAX_ANGLE = 60            # inclusive on each axis: allow a 45-degree tilt and a
 STILL_SMOOTHING = 1.0     # lower = steadier when still, but more lag (try 0.5 to 2)
 MOVING_RESPONSE = 5.0     # higher = catches up faster when you move (try 2 to 10)
 
-# Fade-in: people walking past shouldn't get a filter slapped on them.
-DWELL_SECONDS = 3.0       # continuous eligible detection before anything shows, regardless of fade toggle
+# Fade-in begins on the first eligible detection, with no waiting period.
 FADE_START = 0.1          # first visible opacity
 FADE_IN_SECONDS = 0.4     # time to go from FADE_START to fully visible
 
@@ -655,7 +653,6 @@ class Face:
         self.raw_yaw = self.raw_pitch = 0.0   # this frame's measurement, before calibration and smoothing
         self.last_seen = 0.0
         self.opted_in = False
-        self.change_start = None
         self.fade_start = None
         self.opacity = 0.0
         self.session_start = None
@@ -769,7 +766,7 @@ def update_face(face: Face, det: np.ndarray, tilt, pose, now: float, frame_size:
         face.tilt = tilt                # carried over from last frame by optical flow
     elif face.tilt is None:            # new face: start from the eye line
         face.tilt = math.degrees(math.atan2(det[7] - det[5], det[6] - det[4]))
-    # A long detection gap must not carry consent or a pending dwell to a returning face.
+    # A long detection gap starts a new fade for a returning face.
     if dt > LOST_GRACE_SECONDS:
         reset_activation(face)
     face.landmarks = landmarks
@@ -846,10 +843,10 @@ def is_eligible(face: Face, frame_w: int, frame_h: int) -> bool:
 
 
 # --- Fade-in ---
-# Start at exactly 0.1 after a continuous dwell; revoke immediately on exit or cutoff.
+# Start at exactly 0.1 on the first eligible frame; revoke immediately on exit or cutoff.
 def reset_activation(face: Face) -> None:
     face.opted_in = False
-    face.change_start = face.fade_start = None
+    face.fade_start = None
     face.opacity = 0.0
 
 
@@ -857,12 +854,7 @@ def update_opacity(face: Face, eligible: bool, now: float, dt: float) -> None:
     if not eligible:
         reset_activation(face)
         return
-    if face.change_start is None:
-        face.change_start = now
-    dwell = DWELL_SECONDS if USE_WALK_BY_CHECK else 0.0
     if not face.opted_in:
-        if now - face.change_start < dwell:
-            return
         face.opted_in = True
         face.fade_start = now   # don't charge this frame's elapsed dt to the first fade step
     face.last_eligible = now

@@ -100,24 +100,23 @@ class AcceptanceTests(unittest.TestCase):
                 for center, roll in [((260, 300), 0), ((320, 240), (-1)**trial*45), ((420, 350), 0)]:
                     with self.subTest(filter=actual.name, trial=trial, center=center, roll=roll):
                         faces, effect = {}, RecordingFilter(actual)
-                        for now in np.linspace(10, 13.1, 32):
-                            frame, _ = self.step(faces, effect, float(now), [detection(30, center, roll)])
-                        self.assertTrue(effect.calls)
+                        frame, _ = self.step(faces, effect, 10, [detection(30, center, roll)])
+                        self.assertEqual(effect.calls, [(0, 0.1)])
                         self.assertAlmostEqual(faces[0].roll, roll)
                         self.assertFalse(np.all(frame == 140), "actual renderer must draw")
 
-    def test_every_visit_shorter_than_three_seconds_is_invisible(self):
+    def test_eligible_visits_activate_without_waiting(self):
         for actual in self.filters:
-            for trial in range(10):
-                with self.subTest(filter=actual.name, trial=trial):
-                    faces, effect = {}, RecordingFilter(actual)
-                    for elapsed in np.linspace(0, 2.999, 16):
-                        # Fast lateral crossing right inside the zone, facing forward.
-                        center = (80+480*elapsed/3, 240)
-                        frame, _ = self.step(faces, effect, 10+elapsed, [detection(24, center)])
-                        self.assertTrue(np.all(frame == 140))
-                    self.step(faces, effect, 13.01)
-                    self.assertEqual(effect.calls, [])
+            with self.subTest(filter=actual.name):
+                faces, effect = {}, RecordingFilter(actual)
+                # Even a brief, fast crossing activates while eligible. The removed
+                # three-second rejection rule must not become a hidden delay again.
+                for elapsed in (0, 0.1, 0.2):
+                    center = (160+1000*elapsed, 240)
+                    frame, _ = self.step(faces, effect, 10+elapsed, [detection(24, center)])
+                    self.assertFalse(np.all(frame == 140))
+                    self.assertEqual(len(effect.calls), round(elapsed*10)+1)
+                self.assertEqual(effect.calls[0], (0, 0.1))
 
     def test_sixty_degree_turn_starts_at_point_one_and_increases_five_trials(self):
         for actual in self.filters:
@@ -125,10 +124,7 @@ class AcceptanceTests(unittest.TestCase):
                 with self.subTest(filter=actual.name, trial=trial):
                     faces, effect = {}, RecordingFilter(actual)
                     det = detection(yaw=(-1)**trial*60)
-                    for now in np.arange(10, 13, 0.1):
-                        self.step(faces, effect, float(now), [det])
-                    self.assertFalse(effect.calls)
-                    for now in (13.0, 13.1, 13.2, 13.4):
+                    for now in (10.0, 10.1, 10.2, 10.4):
                         self.step(faces, effect, now, [det])
                     opacity = [value for _, value in effect.calls]
                     self.assertAlmostEqual(opacity[0], 0.1)
@@ -143,7 +139,7 @@ class AcceptanceTests(unittest.TestCase):
                     self.step(faces, effect, 10+elapsed, [detection(60, (80+240*elapsed, 240), yaw=90)])
                 self.assertFalse(effect.calls, actual.name)
 
-    def test_in_zone_profile_and_invalid_pose_never_draw_even_after_dwell(self):
+    def test_in_zone_profile_and_invalid_pose_never_draw_over_time(self):
         for actual in self.filters:
             for pose in [(90, 0, 0), (0, 90, 0), (0, 0, 90), (float("nan"), 0, 0), (60.01, 0, 0)]:
                 with self.subTest(filter=actual.name, pose=pose):
@@ -186,41 +182,40 @@ class AcceptanceTests(unittest.TestCase):
                 self.step(faces, effect, float(now), [detection()], off=True)
             self.assertFalse(effect.calls)
 
-    def test_interruptions_require_fresh_dwell_and_cleanup(self):
+    def test_reentry_restarts_fade_immediately_and_cleanup(self):
         for actual in self.filters:
             faces, effect = {}, RecordingFilter(actual)
-            for now in np.arange(10, 12.9, 0.1):
-                self.step(faces, effect, float(now), [detection()])
-            self.step(faces, effect, 12.9)  # missed detection resets pending activation
-            for now in np.arange(13, 16, 0.1):
-                self.step(faces, effect, float(now), [detection()])
-            self.assertFalse(effect.calls)
-            self.step(faces, effect, 16.1, [detection()])
-            self.assertTrue(effect.calls)
-            self.step(faces, effect, 16.7)
+            self.step(faces, effect, 10, [detection()])
+            self.step(faces, effect, 10.4, [detection()])
+            self.assertAlmostEqual(faces[0].opacity, 1)
+            calls = len(effect.calls)
+            self.step(faces, effect, 10.5)  # missed detection clears the effect
+            self.assertEqual(faces[0].opacity, 0)
+            self.assertEqual(len(effect.calls), calls)
+            self.step(faces, effect, 10.6, [detection()])
+            self.assertEqual(effect.calls[-1], (0, 0.1))
+            self.assertEqual(len(effect.calls), calls+1)
+            self.step(faces, effect, 11.2)
             self.assertEqual(faces, {})
             self.assertEqual(effect.forgotten, [0])
 
-    def test_fade_toggle_cannot_bypass_passerby_dwell(self):
+    def test_no_fade_activates_immediately_at_full_opacity(self):
         with patch.object(system, "USE_FADE_IN", False):
             face = system.Face(0)
-            for now in (10, 11, 12.999):
-                system.update_opacity(face, True, now, 1)
-                self.assertEqual(face.opacity, 0)
-            system.update_opacity(face, True, 13, 0.001)
+            system.update_opacity(face, True, 10, 0.001)
             self.assertEqual(face.opacity, 1)
 
-    def test_independent_multi_user_dwell(self):
+    def test_independent_multi_user_immediate_activation_and_fade(self):
         for actual in self.filters:
             faces, effect = {}, RecordingFilter(actual)
             first, second = detection(28, (180, 260)), detection(24, (460, 340), roll=-45)
-            for now in np.linspace(10, 13.1, 32):
-                dets = [first] if now < 11 else [first, second]
-                self.step(faces, effect, float(now), dets)
+            for now in (10, 10.2, 10.4):
+                self.step(faces, effect, now, [first])
             self.assertEqual({fid for fid, _ in effect.calls}, {0})
-            for now in np.arange(13.1, 14.3, 0.1):
-                self.step(faces, effect, float(now), [first, second])
+            self.step(faces, effect, 10.5, [first, second])
             self.assertEqual({fid for fid, _ in effect.calls}, {0, 1})
+            self.assertAlmostEqual(faces[0].opacity, 1)
+            self.assertEqual(faces[1].opacity, 0.1)
 
     def test_sensor_distance_uses_the_same_zone(self):
         for actual in self.filters:
@@ -240,6 +235,7 @@ class AcceptanceTests(unittest.TestCase):
             for index, distance in enumerate((60, 48, 36, 30, 24, 18, 12, 6)):
                 now = 10 + index*0.1
                 self.step(faces, effect, now, [detection(distance)])
+                self.assertEqual(len(effect.calls), max(0, index-2))
                 self.assertEqual(len(faces), 1)
                 face = faces[0]
                 self.assertAlmostEqual(face.distance, distance, places=4)
@@ -253,7 +249,7 @@ class AcceptanceTests(unittest.TestCase):
                 half = max(1, int(face.size*0.25))
                 self.assertTrue(np.all(frame[ny, nx-half:nx+half+1, 2] > 30))
             self.assertTrue(all(a < b for a, b in zip(widths, widths[1:])))
-            self.assertFalse(effect.calls, "approach has not yet spent three seconds in the zone")
+            self.assertEqual(effect.calls[0], (0, 0.1), "activate on entry at 30 inches")
 
     def test_sway_at_five_feet_has_no_anchor_lag_and_remains_hidden_five_trials(self):
         for actual in self.filters:

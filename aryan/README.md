@@ -6,7 +6,7 @@ Run `python common/main.py clown_nose` from the repo root. The original
 `clown_nose_filter.py` implements `ClownNoseFilter.apply(frame, face, opacity)`.
 It keeps the prototype's relative sizing and upward offset, rotates with the
 head, and uses current nose coordinates without smoothing lag. The shared
-system controls the camera, 30-inch zone, 3-second dwell, angle limit, fade,
+system controls the camera, 30-inch zone, immediate activation, angle limit, fade,
 multi-user tracking, and 4:15 p.m. cutoff for every filter.
 
 The uploaded prototype referenced a missing `clown_nose.png`. A procedural red

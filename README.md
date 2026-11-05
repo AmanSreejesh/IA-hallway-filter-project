@@ -32,16 +32,20 @@ frames are never saved. Press `q` or Escape to quit, `n` to switch filters,
 `d` for distance/angle/FPS diagnostics, and `c` while looking at the screen to
 calibrate forward. `l` explicitly starts/stops a local numeric pose log.
 
-All four filters share the inclusive 30-inch (2.5-foot) opt-in zone and a
-continuous 3-second dwell. Shorter visits never show an effect. The first
-visible opacity is 0.1, increasing to 1 over 0.4 seconds. Head angles up to
+All four filters activate on the first eligible detection within the inclusive
+30-inch (2.5-foot) opt-in zone, with no waiting period. The first visible opacity
+is 0.1, increasing to 1 over 0.4 seconds. Head angles up to
 60 degrees on each axis are allowed, including a 45-degree tilt; a perpendicular
 90-degree profile is rejected. Leaving the zone, losing detection, or exceeding
-the angle limit clears activation immediately and requires a fresh dwell.
+the angle limit clears activation immediately. Re-entering starts a new fade immediately.
 Head movement alone does not revoke activation. Filters turn off immediately at
 4:15 p.m. in the display computer's local timezone, including for existing users,
 and become available again the next day. Set the computer's timezone and clock
 for the school location.
+
+Removing the waiting period supersedes the earlier requirement that visits under
+three seconds never show a filter. Brief visitors can receive an effect while
+they meet the distance, angle and schedule rules.
 
 There is no floor-height requirement, minimum/maximum face-width gate, or
 requirement for the whole face box to fit on screen. A child's face, a seated

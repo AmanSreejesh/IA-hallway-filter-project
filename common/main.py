@@ -75,7 +75,7 @@ MEDIAPIPE_MODEL_URL = ("https://storage.googleapis.com/mediapipe-models/face_lan
 FILTERS = {
     "emoji": ("viraj.emoji_filter", "EmojiFilter"),
     "sharingan": ("aman.sharingan_improved", "SharinganFilter"),
-    # "astronaut": ("ishan.astronaut_filter", "AstronautFilter"),
+    "helmet": ("ishan.helmet_filter", "HelmetFilter"),
     # "clown_nose": ("aryan.clown_nose_filter", "ClownNoseFilter"),
 }
 

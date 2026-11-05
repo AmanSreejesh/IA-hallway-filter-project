@@ -9,7 +9,7 @@ const wheel = $("wheel");
 const LOOKS = {
   emoji: { color: "#E8590C", icon: '<circle cx="12" cy="12" r="9"/><circle cx="9" cy="10" r="1.3" fill="#fff" stroke="none"/><circle cx="15" cy="10" r="1.3" fill="#fff" stroke="none"/><path d="M8 14.5c1 1.6 2.4 2.4 4 2.4s3-.8 4-2.4"/>' },
   sharingan: { color: "#D6336C", icon: '<path d="M2.5 12C5 7.5 8.3 5.5 12 5.5s7 2 9.5 6.5C19 16.5 15.7 18.5 12 18.5S5 16.5 2.5 12Z"/><circle cx="12" cy="12" r="3.6"/><circle cx="12" cy="12" r="1.2" fill="#fff" stroke="none"/>' },
-  astronaut: { color: "#1C7ED6", icon: '<circle cx="12" cy="11" r="8"/><rect x="7" y="8" width="10" height="6" rx="3"/><path d="M7 21h10"/>' },
+  helmet: { color: "#1C7ED6", icon: '<circle cx="12" cy="11" r="8"/><rect x="7" y="8" width="10" height="6" rx="3"/><path d="M7 21h10"/>' },
   clown: { color: "#2F9E44", icon: '<circle cx="12" cy="13" r="6.5"/><path d="M9.3 11a3 3 0 0 1 2.7-1.9"/>' },
 };
 const SPARE_COLORS = ["#7048E8", "#0B7285", "#C2255C", "#5C940D"];

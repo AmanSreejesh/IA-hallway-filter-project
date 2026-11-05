@@ -18,7 +18,7 @@ python common/main.py              # rotate through all registered filters
 forward, and `q` quits. Launching `python aman/sharingan_improved.py` also
 delegates to the shared main loop.
 
-The opt-in zone, ultrasonic sensor, multi-user tracking, 45-degree cutoff,
+The opt-in zone, ultrasonic sensor, multi-user tracking, 60-degree cutoff,
 fading, timers, switching and schedule are all implemented in `common/main.py`.
 This module only draws; it contains no private eligibility settings or camera.
 MediaPipe and its model are required to supply iris/eyelid points. If the shared

@@ -6,6 +6,7 @@ Run from the repo root:
     python common/main.py              # every filter, taking turns
     python common/main.py emoji        # only the filters you name (for testing your own)
     python common/main.py sharingan    # Aman's procedural iris effect
+    python common/main.py astronaut clown_nose
 
 Face tracking: each filter says which face tracker it wants, and this file uses whichever one
 the filter on screen asks for (switching automatically when the filters take turns):
@@ -76,18 +77,20 @@ FILTERS = {
     "emoji": ("viraj.emoji_filter", "EmojiFilter"),
     "sharingan": ("aman.sharingan_improved", "SharinganFilter"),
     "helmet": ("ishan.helmet_filter", "HelmetFilter"),
-    # "clown_nose": ("aryan.clown_nose_filter", "ClownNoseFilter"),
+    "clown_nose": ("aryan.clown_nose_filter", "ClownNoseFilter"),
 }
+# Preserve the earlier astronaut command without duplicating the helmet in the wheel.
+FILTER_ALIASES = {"astronaut": "helmet"}
 
 # --- Feature toggles (True = on, False = off) ---
-USE_OPT_IN_ZONE = True    # only people closer than ZONE_ENTER_INCHES and fully on screen get a filter
-USE_WALK_BY_CHECK = True  # people walking past (faster than WALKING_SPEED) don't get a filter
+USE_OPT_IN_ZONE = True    # only people at or closer than ZONE_ENTER_INCHES get a filter
+USE_WALK_BY_CHECK = True  # require a continuous 3-second opt-in; shorter visits never draw
 USE_ANGLE_LIMIT = True    # stop drawing past MAX_ANGLE, independently for each person
-USE_FADE_IN = True        # wait DWELL_SECONDS, then fade in (off = filter appears/disappears instantly)
+USE_FADE_IN = True        # fade from 0.1 after the shared dwell (off = fully visible after dwell)
 USE_TIMER = True          # 1 minute note and 3 minute reminder
 USE_MULTI_USER = True     # everyone in view gets a filter (off = only the closest person)
 USE_ENGAGEMENT = True     # rotate between filters every FILTER_SWITCH_SECONDS ('n' still works when off)
-USE_SCHEDULE = False       # filters turn off at FILTERS_OFF_AT
+USE_SCHEDULE = True        # filters turn off at FILTERS_OFF_AT (computer's local time)
 USE_HINT_TEXT = True      # "Step up close..." message when nobody is using a filter
 USE_ULTRASONIC = True     # on a Raspberry Pi, measure the opt-in zone with an ultrasonic sensor
                           # (ignored on other computers, which use the camera estimate instead)
@@ -109,8 +112,6 @@ FOCAL_PX = 600            # camera focal length in pixels for a 640-wide picture
                           # width automatically) -- calibrate with the 'd' debug view
 EYE_GAP_INCHES = 2.5      # average distance between a person's eyes
 ZONE_ENTER_INCHES = 30    # at or closer than this (2.5 ft) to opt in
-ZONE_EXIT_INCHES = 33     # ...and you have to step back past this to opt out.
-                          # The gap between the two stops flicker at the border.
 # Ultrasonic sensor (Raspberry Pi only). An HC-SR04 sends out a click of sound and times the echo,
 # which measures distance far more accurately than guessing from the size of a face on camera.
 #
@@ -129,7 +130,7 @@ ZONE_EXIT_INCHES = 33     # ...and you have to step back past this to opt out.
 #
 #   Mount the sensor right next to the camera, pointing the same way, at about chest-to-face
 #   height. It measures the closest thing in a ~15 degree cone in front of it, so keep walls and
-#   furniture out of that cone (or farther away than ZONE_EXIT_INCHES).
+#   furniture out of that cone (or farther away than ZONE_ENTER_INCHES).
 #
 #   Software: gpiozero comes with Raspberry Pi OS. If it's missing: sudo apt install python3-gpiozero
 #   (if you use a virtual environment, create it with --system-site-packages so it can see gpiozero).
@@ -137,21 +138,17 @@ SENSOR_TRIGGER_GPIO = 23
 SENSOR_ECHO_GPIO = 24
 SENSOR_MAX_INCHES = 120   # readings past this count as "nobody there"
 
-WALKING_SPEED = 2.0       # moving faster than this (face widths per second) = walking past, no filter
-MAX_ANGLE = 45            # past this on any axis, stop drawing immediately (stories #2 and #3: follow
-                          # the head up to 45 degrees, stop after that)
+MAX_ANGLE = 60            # inclusive on each axis: allow a 45-degree tilt and a 60-degree turn;
+                          # reject a perpendicular/profile (90-degree) passerby immediately
 
-# Smoothing. Still faces get smoothed a lot (no jitter); moving faces barely at all (no lag).
+# Smoothing for motion diagnostics; drawing uses current-frame geometry to avoid lag.
 STILL_SMOOTHING = 1.0     # lower = steadier when still, but more lag (try 0.5 to 2)
 MOVING_RESPONSE = 5.0     # higher = catches up faster when you move (try 2 to 10)
 
 # Fade-in: people walking past shouldn't get a filter slapped on them.
-DWELL_SECONDS = 0.5       # must stay in the zone this long before anything shows
-LEAVE_SECONDS = 0.3       # must be out of the zone this long before it fades away
-                          # (so one bad frame -- a blink, a missed detection -- can't flicker it)
+DWELL_SECONDS = 3.0       # continuous eligible detection before anything shows, regardless of fade toggle
 FADE_START = 0.1          # first visible opacity
 FADE_IN_SECONDS = 0.4     # time to go from FADE_START to fully visible
-FADE_OUT_SECONDS = 0.3
 
 # Timer
 TIMER_GENTLE_SECONDS = 60     # small note that a minute has passed
@@ -168,6 +165,13 @@ FILTER_SWITCH_SECONDS = 30    # rotate to the next filter this often
 # Schedule: filters turn off after dismissal so nobody heading to the buses gets stopped
 FILTERS_OFF_AT = dtime(16, 15)
 
+
+def filters_are_off(local_now=None) -> bool:
+    """Use the display computer's local clock; the cutoff includes exactly 4:15pm."""
+    local_now = datetime.now() if local_now is None else local_now
+    return USE_SCHEDULE and local_now.time() >= FILTERS_OFF_AT
+
+
 # Looking forward. The camera sits above or below the screen, so someone looking at the screen
 # looks slightly down or up to the camera (and each tracker has its own small bias). These are the
 # head angles that count as "looking straight ahead". Press c while looking at the screen to set
@@ -181,7 +185,11 @@ POSE_LOG_PATH = os.path.join(COMMON_DIR, "pose_log.csv")
 def load_filters(names: list) -> list:
     """Import the filters by name. A broken filter is skipped instead of crashing everything."""
     filters = []
+    loaded = set()
     for name in names or FILTERS:
+        name = FILTER_ALIASES.get(name, name)
+        if name in loaded:
+            continue
         if name not in FILTERS:
             print(f"Unknown filter '{name}'. Choices: {', '.join(FILTERS)}")
             continue
@@ -192,6 +200,7 @@ def load_filters(names: list) -> list:
             print(f"Skipping filter '{name}': {e}")
             continue
         filters.append(f)
+        loaded.add(name)
         print(f"Loaded filter: {name}")
     return filters
 
@@ -348,7 +357,7 @@ class MediaPipeDetector:
         """Detect each face independently in this exact frame, including iris points.
 
         Turning the whole image for the closest face made other people's opposite
-        head tilts harder to detect. The shared 45 degree cutoff needs no such turn.
+        head tilts harder to detect. Each face supplies its own pose instead.
         """
         h, w = frame.shape[:2]
         image = self.mp.Image(image_format=self.mp.ImageFormat.SRGB, data=cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
@@ -570,7 +579,7 @@ def apply_sensor_distance(faces: list, sensor_inches: float) -> None:
 
 # --- Face data handed to every filter ---
 class Face:
-    """One tracked person. Positions/size are smoothed; pose and mesh follow the current frame.
+    """One tracked person. Drawing positions, size, pose and mesh follow the current frame.
 
     id                       stays the same while the person is in view
     box                      (x, y, w, h)
@@ -592,7 +601,6 @@ class Face:
         self.speed = 0.0        # face widths per second
         # system state (filters don't need these)
         self.point_filter = Smoother()
-        self.size_filter = Smoother()
         self.pose_guess = None  # last 3D head pose, used as the starting point for the next frame
         self.tilt = None        # current tilt: MediaPipe pose or YuNet optical flow
         self.landmarks = None   # current-frame iris/eyelid points; None for YuNet
@@ -601,6 +609,7 @@ class Face:
         self.last_seen = 0.0
         self.opted_in = False
         self.change_start = None
+        self.fade_start = None
         self.opacity = 0.0
         self.session_start = None
         self.last_eligible = 0.0
@@ -713,9 +722,13 @@ def update_face(face: Face, det: np.ndarray, tilt, pose, now: float, frame_size:
         face.tilt = tilt                # carried over from last frame by optical flow
     elif face.tilt is None:            # new face: start from the eye line
         face.tilt = math.degrees(math.atan2(det[7] - det[5], det[6] - det[4]))
+    # A long detection gap must not carry consent or a pending dwell to a returning face.
+    if dt > LOST_GRACE_SECONDS:
+        reset_activation(face)
     face.landmarks = landmarks
-    face.points = face.point_filter(raw_points(det), dt, scale)
-    # How fast the nose is moving, in face widths per second (for the walk-by check)
+    face.points = raw_points(det)
+    face.point_filter(face.points, dt, scale)
+    # Diagnostic motion estimate only: head sways must not be treated as walking past.
     face.speed = float(np.hypot(*face.point_filter.velocity[4])) / (scale * 2.6)
 
     # Turn the points so the face is upright, then fit the 3D head there. That way the turn and
@@ -735,7 +748,9 @@ def update_face(face: Face, det: np.ndarray, tilt, pose, now: float, frame_size:
     # the person's movement while the old angle is being averaged away.
     if np.isfinite(face.measured_angles).all():
         face.yaw, face.pitch, face.roll = face.measured_angles
-    face.size = float(face.size_filter(face_size(raw_points(det), face.raw_yaw, face.raw_pitch), dt, scale))
+    # Use current geometry for all renderers: smoothing scale/anchors leaves an uncovered
+    # nose on an approach and trails behind a head sway, especially at close distances.
+    face.size = face_size(face.points, face.raw_yaw, face.raw_pitch)
     face.camera_distance = FOCAL_PX * EYE_GAP_INCHES / face.size
     face.distance = face.camera_distance
     face.last_seen = now
@@ -750,7 +765,7 @@ def track(faces: dict, detections: list, now: float, next_id: list, frame_size: 
         best, best_dist = None, None
         for face in unmatched.values():
             d = float(np.hypot(*(face.points[4] - nose)))
-            if d < max(face.size * 1.5, 60) and (best_dist is None or d < best_dist):
+            if d <= max(face.size * 2.6, float(det[2]) * 0.75, 60) and (best_dist is None or d < best_dist):
                 best, best_dist = face, d
         if best is None:
             best = Face(next_id[0])
@@ -764,51 +779,49 @@ def track(faces: dict, detections: list, now: float, next_id: list, frame_size: 
 def within_angle_limit(face: Face) -> bool:
     """A current-frame boundary, shared by every filter and detector. Exactly MAX_ANGLE still counts."""
     return bool(np.isfinite(face.measured_angles).all() and
-                max(abs(a) for a in face.measured_angles) <= MAX_ANGLE)
+                max(abs(a) for a in face.measured_angles) <= MAX_ANGLE + 1e-5)
 
 
 # --- Opt-in zone ---
-# Only apply a filter when a person is close, looking at the screen, and fully in view.
+# No floor-height or full-face-box requirement: seated/short visitors and close-ups use
+# exactly the same rules. Clip artwork at the image edges, not at a maximum face size.
 def is_eligible(face: Face, frame_w: int, frame_h: int) -> bool:
-    zone = ZONE_EXIT_INCHES if face.opted_in else ZONE_ENTER_INCHES
-    if USE_OPT_IN_ZONE and face.distance > zone:
+    if not math.isfinite(face.distance) or face.distance <= 0:
         return False
-    if USE_WALK_BY_CHECK and face.speed > WALKING_SPEED:
-        return False   # walking past, not stopping to play
+    # Landmark rows are float32; do not reject an exact boundary because of
+    # sub-pixel arithmetic (the tolerance is only one hundred-thousandth inch).
+    if USE_OPT_IN_ZONE and face.distance > ZONE_ENTER_INCHES + 1e-5:
+        return False
     if USE_ANGLE_LIMIT and not within_angle_limit(face):
         return False
-    if not USE_OPT_IN_ZONE:
-        return True
-    x, y, w, h = face.box
-    if face.opted_in:
-        nx, ny = face.nose   # once opted in, only the nose has to stay on screen
-        return 0 <= nx < frame_w and 0 <= ny < frame_h
-    return x >= 0 and y >= 0 and x + w <= frame_w and y + h <= frame_h
+    nx, ny = face.nose
+    return 0 <= nx < frame_w and 0 <= ny < frame_h
 
 
 # --- Fade-in ---
-# Start the filter at low opacity and raise it while the person stays. Fade out when they leave.
-def update_opacity(face: Face, eligible: bool, now: float, dt: float) -> None:
-    # Only switch in or out once the new answer has held steady for a moment. Before, a
-    # single bad frame (noisy distance, a blink, a missed detection) restarted the fade,
-    # which is why the opacity jumped up and down at random.
-    if eligible == face.opted_in:
-        face.change_start = None
-    elif face.change_start is None:
-        face.change_start = now
-    elif now - face.change_start >= ((DWELL_SECONDS if USE_FADE_IN else 0) if eligible else LEAVE_SECONDS):
-        face.opted_in = eligible
-        face.change_start = None
+# Start at exactly 0.1 after a continuous dwell; revoke immediately on exit or cutoff.
+def reset_activation(face: Face) -> None:
+    face.opted_in = False
+    face.change_start = face.fade_start = None
+    face.opacity = 0.0
 
-    if not USE_FADE_IN:
-        face.opacity = 1.0 if face.opted_in else 0.0
-        if face.opted_in:
-            face.last_eligible = now
-    elif face.opted_in:
-        face.last_eligible = now
-        face.opacity = min(1.0, max(face.opacity, FADE_START) + dt * (1 - FADE_START) / FADE_IN_SECONDS)
-    else:
-        face.opacity = max(0.0, face.opacity - dt / FADE_OUT_SECONDS)
+
+def update_opacity(face: Face, eligible: bool, now: float, dt: float) -> None:
+    if not eligible:
+        reset_activation(face)
+        return
+    if face.change_start is None:
+        face.change_start = now
+    dwell = DWELL_SECONDS if USE_WALK_BY_CHECK else 0.0
+    if not face.opted_in:
+        if now - face.change_start < dwell:
+            return
+        face.opted_in = True
+        face.fade_start = now   # don't charge this frame's elapsed dt to the first fade step
+    face.last_eligible = now
+    elapsed = max(0.0, now - face.fade_start)
+    face.opacity = (min(1.0, FADE_START + elapsed * (1 - FADE_START) / FADE_IN_SECONDS)
+                    if USE_FADE_IN else 1.0)
 
 
 # --- Timer ---
@@ -846,13 +859,15 @@ def draw_debug(frame, face: Face) -> None:
               x + w / 2, y + h + 20, 0.4, color)
 
 
-def process_faces(frame, faces, filters, active, now, dt, filters_off=False, sensor_inches=None, draw_notes=True):
+def process_faces(frame, faces, filters, active, now, dt, filters_off=None, sensor_inches=None, draw_notes=True):
     """Shared opt-in, sensor correction, multi-user, angle gate, fade and timer.
 
     Filters draw only. Every registered filter passes through these same rules.
     Returns (faces seen this frame, firm reminder, anyone has a filter, gentle note showing).
     """
     h, w = frame.shape[:2]
+    if filters_off is None:
+        filters_off = filters_are_off()
     # Multi-user off: only the closest person (biggest face) can get a filter
     seen_faces = [f for f in faces.values() if f.last_seen == now]
     closest = max(seen_faces, key=lambda f: f.size).id if seen_faces else None
@@ -872,7 +887,7 @@ def process_faces(frame, faces, filters, active, now, dt, filters_off=False, sen
                     f.forget(face.id)
             del faces[face.id]
             continue
-        if seen and allowed and not filters_off and face.opacity > 0 and (not USE_ANGLE_LIMIT or within_angle_limit(face)):
+        if seen and allowed and face.opacity > 0:
             anyone = True
             active.apply(frame, face, face.opacity)
         if USE_TIMER:
@@ -899,7 +914,8 @@ def save_calibration(saved: dict) -> None:
 def main(argv=None):
     global FOCAL_PX, MEDIAPIPE_MAX_FACES
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("filters", nargs="*", help="Available: " + ", ".join(FILTERS))
+    parser.add_argument("filters", nargs="*", help="Available: " + ", ".join(FILTERS) +
+                        " (astronaut is an alias for helmet)")
     parser.add_argument("--camera", type=int, default=None,
                         help="camera number (default: the first one that shows a picture)")
     parser.add_argument("--max-faces", type=int, default=MEDIAPIPE_MAX_FACES)
@@ -975,7 +991,6 @@ def main(argv=None):
             now = time.monotonic()
             dt, last = now - last, now
             fps = smooth(fps, 1 / max(dt, 1e-3), 0.1)
-            filters_off = USE_SCHEDULE and datetime.now().time() >= FILTERS_OFF_AT
 
             # Engagement: switch between the team's filters
             if auto and now >= next_switch and len(filters) > 1:
@@ -1011,6 +1026,8 @@ def main(argv=None):
             tracked = [(f.nose, f.tilt, f.size) for f in faces.values()]
             track(faces, detector.detect(frame, tracked), now, next_id, (w, h))
             sensor_inches = read_sensor(sensor)
+            # Check after inference: a slow detector may have crossed dismissal time.
+            filters_off = filters_are_off()
             # In dashboard mode the page shows the notes and reminders in its own type, so the
             # picture stays clean. The --window view draws them onto the frame like before.
             draw_notes = dashboard is None

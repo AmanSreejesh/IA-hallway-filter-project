@@ -3,7 +3,7 @@ Emoji filter: puts a random 3D emoji over a face.
 
 This is an attachable module for common/main.py. It only draws. main.py decides
 WHO gets a filter (opt-in zone, fade-in, timer, multi-user) and hands this filter
-one face at a time, already smoothed, with its head angles worked out.
+one face at a time, with its current-frame landmarks and head angles worked out.
 
 How it behaves:
   - Each emoji is a 3D model (see emoji_3d.py) that turns with your head: tilt (roll),

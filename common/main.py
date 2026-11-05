@@ -18,9 +18,21 @@ TRACKER below can force one tracker for everything.
 Opt-in zone: on a Raspberry Pi with the ultrasonic sensor wired up (see the wiring notes below),
 distance comes from the sensor. Anywhere else it's estimated from the size of the face.
 
-Keys:  q = quit   n = next filter   d = debug view (distance, head angles, FPS -- for calibrating)
+Dashboard: the camera fills a full-screen web page (common/dashboard/). A small filter wheel sits
+at the bottom: tap it to open it, spin it or tap a slice to pick a filter. A picked filter stays
+until nobody has been in view for FILTER_SWITCH_SECONDS, then the filters take turns again.
+On the Pi it opens Chromium in kiosk mode by itself; anywhere else it opens a browser tab (tap it
+once to go full screen). The page is only reachable from this computer. Staff controls
+(calibrate, debug view) open by holding the top-left corner of the screen for 2 seconds.
+    python common/main.py --window      # the old OpenCV window instead of the dashboard
+    python common/main.py --no-browser  # start the dashboard without opening a browser
+
+Keys (in the dashboard page or the --window window):
+       n = next filter   d = debug view (distance, head angles, FPS -- for calibrating)
        c = calibrate "looking forward": look straight at the screen and press c (saved for next time)
-       l = start/stop recording head angles to common/pose_log.csv (numbers only, for finding problems)
+       f = full screen, left/right arrows = turn the wheel (dashboard only)
+Window only:  q = quit   l = start/stop recording head angles to common/pose_log.csv
+In dashboard mode, stop the program with Ctrl+C in the terminal.
 
 How a filter plugs in (see viraj/emoji_filter.py for an example):
   - Make a class with a `name`, an `apply(frame, face, opacity)` method that draws onto
@@ -50,6 +62,7 @@ import numpy as np
 
 COMMON_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(COMMON_DIR))   # repo root, so "viraj.emoji_filter" imports
+sys.path.insert(1, COMMON_DIR)                     # so "dashboard_server" imports
 
 MODEL_PATH = os.path.join(COMMON_DIR, "face_detection_yunet_2023mar.onnx")
 MODEL_URL = ("https://github.com/opencv/opencv_zoo/raw/main/models/"
@@ -69,7 +82,7 @@ FILTERS = {
 # --- Feature toggles (True = on, False = off) ---
 USE_OPT_IN_ZONE = True    # only people closer than ZONE_ENTER_INCHES and fully on screen get a filter
 USE_WALK_BY_CHECK = True  # people walking past (faster than WALKING_SPEED) don't get a filter
-USE_ANGLE_LIMIT = True    # stop drawing at MAX_ANGLE, independently for each person
+USE_ANGLE_LIMIT = True    # stop drawing past MAX_ANGLE, independently for each person
 USE_FADE_IN = True        # wait DWELL_SECONDS, then fade in (off = filter appears/disappears instantly)
 USE_TIMER = True          # 1 minute note and 3 minute reminder
 USE_MULTI_USER = True     # everyone in view gets a filter (off = only the closest person)
@@ -81,7 +94,9 @@ USE_ULTRASONIC = True     # on a Raspberry Pi, measure the opt-in zone with an u
 
 # --- Settings (keep in sync with constraints.md) ---
 TRACKER = None            # None = whatever each filter asks for, or "mediapipe" / "yunet" to force one
-CAMERA_SIZE = (640, 480)
+CAMERA_SIZE = (1280, 720)   # widescreen, so the picture fills a 16:9 screen without cutting much off
+PROCESS_HEIGHT = 480        # frames are shrunk to this height (854x480) before anything else, which
+                            # keeps the Pi as fast as the old 640x480 and the screen still looks sharp
 DETECT_SCALE = 0.5        # look for faces on a half-size copy of the frame (~4x less work on the Pi).
                           # People in the opt-in zone are big on screen, so nothing is lost.
 NEW_FACE_EVERY = 3        # while someone's being tracked, scan the whole picture for new people every N frames
@@ -90,7 +105,8 @@ MEDIAPIPE_MAX_FACES = 8   # each extra face costs time on the Pi
 
 # Opt-in zone. On a Raspberry Pi with the ultrasonic sensor, distance comes from the sensor.
 # Otherwise it's estimated from how far apart the eyes look on screen.
-FOCAL_PX = 600            # camera focal length in pixels -- calibrate with the 'd' debug view
+FOCAL_PX = 600            # camera focal length in pixels for a 640-wide picture (scaled to the real
+                          # width automatically) -- calibrate with the 'd' debug view
 EYE_GAP_INCHES = 2.5      # average distance between a person's eyes
 ZONE_ENTER_INCHES = 30    # at or closer than this (2.5 ft) to opt in
 ZONE_EXIT_INCHES = 33     # ...and you have to step back past this to opt out.
@@ -122,7 +138,8 @@ SENSOR_ECHO_GPIO = 24
 SENSOR_MAX_INCHES = 120   # readings past this count as "nobody there"
 
 WALKING_SPEED = 2.0       # moving faster than this (face widths per second) = walking past, no filter
-MAX_ANGLE = 45            # at or beyond this on any axis, stop drawing immediately
+MAX_ANGLE = 45            # past this on any axis, stop drawing immediately (stories #2 and #3: follow
+                          # the head up to 45 degrees, stop after that)
 
 # Smoothing. Still faces get smoothed a lot (no jitter); moving faces barely at all (no lag).
 STILL_SMOOTHING = 1.0     # lower = steadier when still, but more lag (try 0.5 to 2)
@@ -711,9 +728,9 @@ def track(faces: dict, detections: list, now: float, next_id: list, frame_size: 
 
 
 def within_angle_limit(face: Face) -> bool:
-    """A strict current-frame boundary, shared by every filter and detector."""
+    """A current-frame boundary, shared by every filter and detector. Exactly MAX_ANGLE still counts."""
     return bool(np.isfinite(face.measured_angles).all() and
-                max(abs(a) for a in face.measured_angles) < MAX_ANGLE - 1e-7)
+                max(abs(a) for a in face.measured_angles) <= MAX_ANGLE)
 
 
 # --- Opt-in zone ---
@@ -770,19 +787,21 @@ def draw_text(frame, text, x, y, scale, color, thickness=1):
     cv2.putText(frame, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, scale, color, thickness, cv2.LINE_AA)
 
 
-def draw_timer(frame, face: Face, now: float) -> bool:
-    """Draw the gentle note above this person. Returns True if they need the firm reminder."""
+def draw_timer(frame, face: Face, now: float, draw: bool = True) -> tuple:
+    """Draw the gentle note above this person (unless the dashboard shows it instead).
+    Returns (gentle note showing, needs the firm reminder)."""
     if face.opacity > 0 and face.session_start is None:
         face.session_start = now
     if face.session_start is not None and now - face.last_eligible > TIMER_RESET_SECONDS:
         face.session_start = None
     if face.session_start is None or face.opacity <= 0:
-        return False
+        return False, False
     used = now - face.session_start
-    if TIMER_GENTLE_SECONDS <= used < TIMER_GENTLE_SECONDS + GENTLE_SHOW_SECONDS:
+    gentle = TIMER_GENTLE_SECONDS <= used < TIMER_GENTLE_SECONDS + GENTLE_SHOW_SECONDS
+    if gentle and draw:
         x, y, w, _ = face.box
         draw_text(frame, "1 minute has passed", x + w / 2, y - 10, 0.5, (255, 255, 255))
-    return used >= TIMER_FIRM_SECONDS
+    return gentle, used >= TIMER_FIRM_SECONDS
 
 
 def draw_debug(frame, face: Face) -> None:
@@ -793,10 +812,11 @@ def draw_debug(frame, face: Face) -> None:
               x + w / 2, y + h + 20, 0.4, color)
 
 
-def process_faces(frame, faces, filters, active, now, dt, filters_off=False, sensor_inches=None):
+def process_faces(frame, faces, filters, active, now, dt, filters_off=False, sensor_inches=None, draw_notes=True):
     """Shared opt-in, sensor correction, multi-user, angle gate, fade and timer.
 
     Filters draw only. Every registered filter passes through these same rules.
+    Returns (faces seen this frame, firm reminder, anyone has a filter, gentle note showing).
     """
     h, w = frame.shape[:2]
     # Multi-user off: only the closest person (biggest face) can get a filter
@@ -806,8 +826,7 @@ def process_faces(frame, faces, filters, active, now, dt, filters_off=False, sen
     if USE_ULTRASONIC and sensor_inches is not None:
         apply_sensor_distance(seen_faces, sensor_inches)
 
-    firm = False
-    anyone = False
+    firm = gentle = anyone = False
     for face in list(faces.values()):
         seen = face.last_seen == now
         allowed = USE_MULTI_USER or face.id == closest
@@ -823,12 +842,26 @@ def process_faces(frame, faces, filters, active, now, dt, filters_off=False, sen
             anyone = True
             active.apply(frame, face, face.opacity)
         if USE_TIMER:
-            firm |= draw_timer(frame, face, now)
+            g, f = draw_timer(frame, face, now, draw_notes)
+            gentle, firm = gentle or g, firm or f
 
-    return seen_faces, firm, anyone
+    return seen_faces, firm, anyone, gentle
 
 
 # --- Main camera loop ---
+KEY_ACTIONS = {ord('n'): "next", ord('d'): "debug", ord('c'): "calibrate", ord('l'): "log"}
+
+
+def save_calibration(saved: dict) -> None:
+    try:
+        with open(CALIBRATION_PATH + ".part", "w") as out:
+            json.dump(saved, out, indent=2)
+        os.replace(CALIBRATION_PATH + ".part", CALIBRATION_PATH)
+        print(f"Calibrated looking forward: yaw {FORWARD['yaw']}, pitch {FORWARD['pitch']} (saved)")
+    except OSError as error:
+        print(f"Calibration active for this session; could not save it: {error}")
+
+
 def main(argv=None):
     global FOCAL_PX, MEDIAPIPE_MAX_FACES
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -836,6 +869,9 @@ def main(argv=None):
     parser.add_argument("--camera", type=int, default=0)
     parser.add_argument("--max-faces", type=int, default=MEDIAPIPE_MAX_FACES)
     parser.add_argument("--focal-px", type=float, default=FOCAL_PX)
+    parser.add_argument("--window", action="store_true", help="show an OpenCV window instead of the dashboard")
+    parser.add_argument("--port", type=int, default=8000, help="dashboard port (default 8000)")
+    parser.add_argument("--no-browser", action="store_true", help="don't open a browser for the dashboard")
     args = parser.parse_args(argv)
     if args.max_faces < 1 or not math.isfinite(args.focal_px) or args.focal_px <= 0:
         parser.error("--max-faces and --focal-px must be positive")
@@ -856,16 +892,36 @@ def main(argv=None):
         if sensor:
             sensor.close()
         return 1
-    print("Running. q = quit, n = next filter, d = debug view, c = calibrate forward, l = record angles.")
+
+    dashboard = None
+    if not args.window:
+        from dashboard_server import Dashboard, open_browser
+        try:
+            dashboard = Dashboard(port=args.port)
+        except OSError as error:
+            print(f"Error: could not start the dashboard ({error}). Try --window.")
+            cam.release()
+            if sensor:
+                sensor.close()
+            return 1
+        print(f"Dashboard: {dashboard.url}  (Ctrl+C to stop)")
+        if not args.no_browser:
+            open_browser(dashboard.url, kiosk=is_raspberry_pi())
+    else:
+        print("Running. q = quit, n = next filter, d = debug view, c = calibrate forward, l = record angles.")
     log_file = log = None
 
     faces = {}
     next_id = [0]
     current = 0
+    auto = USE_ENGAGEMENT     # taking turns between filters (the dashboard can pick one instead)
     next_switch = time.monotonic() + FILTER_SWITCH_SECONDS
     debug = False
     last = time.monotonic()
+    last_state = 0.0
     fps = 0.0
+    nobody_since = time.monotonic()   # taking turns starts again once everyone has left
+    focal_set = False
 
     try:
         while True:
@@ -873,15 +929,21 @@ def main(argv=None):
             if frame is None:
                 print("Error: Failed to grab frame.")
                 return 1
+            if frame.shape[0] != PROCESS_HEIGHT:
+                scale = PROCESS_HEIGHT / frame.shape[0]
+                frame = cv2.resize(frame, (round(frame.shape[1] * scale), PROCESS_HEIGHT), interpolation=cv2.INTER_AREA)
             frame = cv2.flip(frame, 1)   # mirror view, like a selfie camera
             h, w = frame.shape[:2]
+            if not focal_set:   # FOCAL_PX is for a 640-wide picture; most webcams' widescreen mode
+                FOCAL_PX = args.focal_px * w / 640   # keeps the same side-to-side view
+                focal_set = True
             now = time.monotonic()
             dt, last = now - last, now
             fps = smooth(fps, 1 / max(dt, 1e-3), 0.1)
             filters_off = USE_SCHEDULE and datetime.now().time() >= FILTERS_OFF_AT
 
             # Engagement: switch between the team's filters
-            if USE_ENGAGEMENT and now >= next_switch and len(filters) > 1:
+            if auto and now >= next_switch and len(filters) > 1:
                 current = (current + 1) % len(filters)
                 next_switch = now + FILTER_SWITCH_SECONDS
             active = filters[current]
@@ -914,63 +976,92 @@ def main(argv=None):
             tracked = [(f.nose, f.tilt, f.size) for f in faces.values()]
             track(faces, detector.detect(frame, tracked), now, next_id, (w, h))
             sensor_inches = read_sensor(sensor)
-            seen_faces, firm, anyone = process_faces(
-                frame, faces, filters, active, now, dt, filters_off, sensor_inches)
+            # In dashboard mode the page shows the notes and reminders in its own type, so the
+            # picture stays clean. The --window view draws them onto the frame like before.
+            draw_notes = dashboard is None
+            seen_faces, firm, anyone, gentle = process_faces(
+                frame, faces, filters, active, now, dt, filters_off, sensor_inches, draw_notes)
+            # Someone picked a filter on the screen: it stays until everyone has left for a while,
+            # then the filters go back to taking turns for the next people.
+            if seen_faces:
+                nobody_since = now
+            elif not auto and USE_ENGAGEMENT and now - nobody_since > FILTER_SWITCH_SECONDS:
+                auto = True
+                next_switch = now + FILTER_SWITCH_SECONDS
             if debug:
                 for face in faces.values():
                     draw_debug(frame, face)
-
-            if firm:
-                draw_text(frame, "3 minutes! Time to get back to your work.", w / 2, 40, 0.8, (0, 200, 255), 2)
-            if filters_off:
-                draw_text(frame, "Filters are off for the day", w / 2, h - 16, 0.5, (200, 200, 200))
-            elif USE_HINT_TEXT and not anyone:
-                draw_text(frame, "Step up close and look here to try a filter", w / 2, h - 16, 0.5, (255, 255, 255))
-            if debug:
                 sensor_text = f"  sensor {sensor_inches:.0f}in" if sensor_inches is not None else ""
                 draw_text(frame, f"Filter: {active.name}  {fps:.0f} FPS{sensor_text}", 140, 20, 0.5, (255, 255, 0))
 
-            cv2.imshow("Hallway Filter", frame)
-            key = cv2.waitKey(1) & 0xFF
-            if key in (ord('q'), 27):
-                break
-            if cv2.getWindowProperty("Hallway Filter", cv2.WND_PROP_VISIBLE) < 1:
-                break
-            if key == ord('n'):
-                current = (current + 1) % len(filters)
-                next_switch = now + FILTER_SWITCH_SECONDS
-            if key == ord('c') and seen_faces:
-                # whoever is closest is looking straight at the screen right now
-                f = max(seen_faces, key=lambda f: f.size)
-                FORWARD.update(yaw=round(f.raw_yaw, 1), pitch=round(f.raw_pitch, 1))
-                saved[tracker] = dict(FORWARD)
-                try:
-                    with open(CALIBRATION_PATH + ".part", "w") as out:
-                        json.dump(saved, out, indent=2)
-                    os.replace(CALIBRATION_PATH + ".part", CALIBRATION_PATH)
-                    print(f"Calibrated looking forward: yaw {FORWARD['yaw']}, pitch {FORWARD['pitch']} (saved)")
-                except OSError as error:
-                    print(f"Calibration active for this session; could not save it: {error}")
-            if key == ord('l'):
-                if log_file:
-                    log_file.close()
-                    log_file = log = None
-                    print(f"Stopped recording. Saved to {POSE_LOG_PATH}")
-                else:
-                    log_file = open(POSE_LOG_PATH, "w", newline="")
-                    log = csv.writer(log_file)
-                    log.writerow(["time", "face", "raw_yaw", "raw_pitch", "tilt", "yaw", "pitch", "roll",
-                                  "nose_x", "nose_y", "size", "distance", "opacity"])
-                    print(f"Recording head angles to {POSE_LOG_PATH} (press l again to stop)")
+            # --- Show the frame, then collect what people asked for ---
+            actions = []
+            if dashboard:
+                dashboard.publish(frame)
+                if now - last_state > 0.2:   # the page polls about once a second; no need to rebuild every frame
+                    last_state = now
+                    dashboard.state = {
+                        "filters": [f.name for f in filters], "active": current, "auto": auto,
+                        "switch_in": max(0.0, next_switch - now) if auto and len(filters) > 1 else None,
+                        "switch_every": FILTER_SWITCH_SECONDS,
+                        "hint": USE_HINT_TEXT and not anyone and not filters_off,
+                        "gentle": gentle, "firm": firm, "off": filters_off,
+                        "people": len(seen_faces), "debug": debug, "fps": round(fps),
+                        "tracker": "MediaPipe" if "MediaPipe" in tracker else "YuNet",
+                    }
+                actions = list(dashboard.pending())
+            else:
+                if firm:
+                    draw_text(frame, "3 minutes! Time to get back to your work.", w / 2, 40, 0.8, (0, 200, 255), 2)
+                if filters_off:
+                    draw_text(frame, "Filters are off for the day", w / 2, h - 16, 0.5, (200, 200, 200))
+                elif USE_HINT_TEXT and not anyone:
+                    draw_text(frame, "Step up close and look here to try a filter", w / 2, h - 16, 0.5, (255, 255, 255))
+                cv2.imshow("Hallway Filter", frame)
+                key = cv2.waitKey(1) & 0xFF
+                if key in (ord('q'), 27) or cv2.getWindowProperty("Hallway Filter", cv2.WND_PROP_VISIBLE) < 1:
+                    break
+                if key in KEY_ACTIONS:
+                    actions.append((KEY_ACTIONS[key], None))
+
+            for action, value in actions:
+                if action == "next":
+                    current = (current + 1) % len(filters)
+                    next_switch = now + FILTER_SWITCH_SECONDS
+                elif action == "select" and 0 <= value < len(filters):
+                    current, auto = value, False   # stay on the filter they picked
+                    nobody_since = now   # someone's at the screen, even if the camera hasn't found them yet
+                elif action == "auto":
+                    auto = True
+                    next_switch = now + FILTER_SWITCH_SECONDS
+                elif action == "calibrate" and seen_faces:
+                    # whoever is closest is looking straight at the screen right now
+                    f = max(seen_faces, key=lambda f: f.size)
+                    FORWARD.update(yaw=round(f.raw_yaw, 1), pitch=round(f.raw_pitch, 1))
+                    saved[tracker] = dict(FORWARD)
+                    save_calibration(saved)
+                elif action == "debug":
+                    debug = not debug
+                    for f in filters:
+                        f.debug = debug   # lets a filter draw its own debug info too
+                elif action == "log":
+                    if log_file:
+                        log_file.close()
+                        log_file = log = None
+                        print(f"Stopped recording. Saved to {POSE_LOG_PATH}")
+                    else:
+                        log_file = open(POSE_LOG_PATH, "w", newline="")
+                        log = csv.writer(log_file)
+                        log.writerow(["time", "face", "raw_yaw", "raw_pitch", "tilt", "yaw", "pitch", "roll",
+                                      "nose_x", "nose_y", "size", "distance", "opacity"])
+                        print(f"Recording head angles to {POSE_LOG_PATH} (press l again to stop)")
+                if dashboard:
+                    last_state = 0.0   # send the change to the page right away
             if log:
                 for f in seen_faces:
                     log.writerow([f"{now:.3f}", f.id, f"{f.raw_yaw:.2f}", f"{f.raw_pitch:.2f}", f"{f.tilt:.2f}",
                                   f"{f.yaw:.2f}", f"{f.pitch:.2f}", f"{f.roll:.2f}", f"{f.nose[0]:.1f}", f"{f.nose[1]:.1f}",
                                   f"{f.size:.1f}", f"{f.distance:.1f}", f"{f.opacity:.2f}"])
-            if key == ord('d'):
-                debug = not debug
-                for f in filters:
-                    f.debug = debug   # lets a filter draw its own debug info too
 
     except KeyboardInterrupt:
         pass
@@ -979,6 +1070,8 @@ def main(argv=None):
         return 1
     finally:
         cam.release()
+        if dashboard:
+            dashboard.close()
         if log_file:
             log_file.close()
         if sensor:
@@ -986,7 +1079,8 @@ def main(argv=None):
         for detector in detectors.values():
             if hasattr(detector, "close"):
                 detector.close()
-        cv2.destroyAllWindows()
+        if args.window:
+            cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":

@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="color-scheme" content="dark">
+<title>Hallway Filters</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<img id="feed" src="stream" alt="" draggable="false">
+
+<p class="pill pill-top" id="message" role="status"></p>
+<p class="pill pill-name" id="name"></p>
+
+<div class="card-wrap" id="firm">
+  <div class="card"><p class="card-big">3 minutes are up</p><p class="card-small">Time to get back to class</p></div>
+</div>
+<div class="card-wrap" id="off">
+  <div class="card"><p class="card-big">Filters are off for today</p><p class="card-small">See you tomorrow</p></div>
+</div>
+
+<!-- The filter wheel. Layers turn at different speeds while it spins. -->
+<div class="wheel" id="wheel" role="radiogroup" aria-label="Filters">
+  <div class="layer drift-slow"><div class="layer" id="ticksLayer"><svg viewBox="-130 -130 260 260" id="ticks" aria-hidden="true"></svg></div></div>
+  <div class="layer drift-back"><div class="layer" id="dashLayer"><svg viewBox="-130 -130 260 260" aria-hidden="true">
+    <circle r="66" fill="none" stroke="#fff" stroke-opacity=".45" stroke-width="1.5" stroke-dasharray="2 7"/>
+  </svg></div></div>
+  <div class="layer" id="segLayer"><svg viewBox="-130 -130 260 260" id="segs" aria-hidden="true"></svg></div>
+  <div class="layer" id="icons"></div>
+  <svg class="layer" viewBox="-130 -130 260 260" aria-hidden="true"><path id="pointer" d="M-9 -146 L9 -146 L0 -134 Z" fill="#fff"/></svg>
+  <div class="hub" id="hub"></div>
+</div>
+
+<!-- Staff only: hold the top-left corner for 2 seconds -->
+<div class="corner" id="corner" aria-hidden="true"></div>
+<div class="card-wrap staff" id="staff" hidden>
+  <div class="card">
+    <button class="btn" data-staff="calibrate" id="calibrate">Calibrate (look straight at the screen)</button>
+    <button class="btn" data-staff="debug" id="debug">Debug view: off</button>
+    <button class="btn" data-staff="fullscreen">Full screen</button>
+    <button class="btn btn-quiet" data-staff="close">Close</button>
+    <p class="card-small" id="staffInfo"></p>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

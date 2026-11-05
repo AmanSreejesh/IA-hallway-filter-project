@@ -28,7 +28,7 @@ can now receive an effect whenever the distance, angle and schedule rules allow 
 | Walk perpendicular to the camera along a path whose closest point is 5 feet away, crossing in 2 seconds | No effect at any point | 5/5 |
 | Walk in from 30 inches at a 60-degree turn | Opacity 0.1 at 30 inches, increasing as they come closer, full at 25 inches | 5/5 |
 | Hurry through view in less than 3 seconds, including inside the zone | Earlier no-effect requirement superseded by immediate activation; eligible brief visitors can receive the effect | Original 9/10 target no longer enforced |
-| Enter view at or after 4:15 p.m. local time; also test someone already active at cutoff | No effect on or after the cutoff, including during a fade | 100% (record trial count) |
+| Enter view at or after 4:15 p.m. local time; also test someone already active at cutoff | No effect from the cutoff until 7:30 a.m., including during a fade; effects work again from 7:30 a.m. | 100% (record trial count) |
 
 ## Automated checks
 
@@ -56,11 +56,13 @@ camera can see both standing children's faces and seated faces. Enable debug
 view (`d`) to check distance and angles; calibrate forward (`c`) while looking
 at the display. Then set the zone: stand with your eyes exactly 30 inches from
 the camera (tape measure), look at the screen and press `z` (or "Set 30-inch
-distance" in the staff controls). This measures your eye gap on this camera, so
-the debug view reads exactly 30 inches for you there; it is saved and loaded on
-every start. Distance comes from eye spacing, so people whose eyes are closer
-together or farther apart than the person who pressed `z` read slightly farther
-or nearer; verify the boundary with each participant.
+distance" in the staff controls). This measures the camera's focal length, so
+the debug view reads exactly 30 inches there; it is saved and loaded on every
+start. Distance comes from eye spacing, and each person's own eye gap is
+measured against their iris (about 11.7 mm wide in everyone), so children and
+adults with closer- or wider-set eyes read correctly too. The debug view shows
+"eye gap ... (measured)" once a person has been measured, usually within a
+second while they face the screen. Verify the boundary with each participant.
 
 Repeat the table for each filter and record filter, participant/height condition,
 distance source, trial number, observed behavior, and pass/fail. For approaches,

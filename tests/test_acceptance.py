@@ -22,11 +22,15 @@ from ishan.astronaut_filter import AstronautFilter
 from viraj.emoji_filter import rotation
 
 
-def detection(distance=24, center=(320, 240), roll=0, yaw=0, pitch=0):
+def detection(distance=24, center=(320, 240), roll=0, yaw=0, pitch=0, eye_gap=None, gaze=0.0):
     """Generate current-frame points, including iris mesh, for someone `distance` inches away
-    (straight-line, like a tape measure) with the point between their eyes at `center`."""
+    (straight-line, like a tape measure) with the point between their eyes at `center`.
+    eye_gap is the person's real eye gap in inches (default: the average); their iris is the
+    usual IRIS_MM wide. gaze shifts both irises sideways, as a fraction of the eye's width."""
+    eye_gap = eye_gap or system.EYE_GAP_INCHES
     ray = math.hypot((center[0] - 320) / system.FOCAL_PX, (center[1] - 240) / system.FOCAL_PX, 1.0)
-    size = system.FOCAL_PX * system.EYE_GAP_INCHES * ray / distance
+    size = system.FOCAL_PX * eye_gap * ray / distance
+    iris_r = system.IRIS_MM / 25.4 / eye_gap / 2   # iris radius, in eye gaps
     angle = math.radians(roll)
     rotate = np.array([[math.cos(angle), -math.sin(angle)],
                        [math.sin(angle), math.cos(angle)]])
@@ -43,9 +47,10 @@ def detection(distance=24, center=(320, 240), roll=0, yaw=0, pitch=0):
     for eye_x, (contour, iris, ring) in zip((-0.5, 0.5), EYES):
         t = np.arange(16) * 2 * math.pi / 16
         mesh[list(contour)] = pixels(np.column_stack((eye_x-0.24*np.cos(t), -0.55+0.12*np.sin(t))))
-        mesh[iris] = pixels([eye_x, -0.55])
-        mesh[list(ring)] = pixels([[eye_x+0.09, -0.55], [eye_x, -0.64],
-                                  [eye_x-0.09, -0.55], [eye_x, -0.46]])
+        look = eye_x + gaze * 0.48
+        mesh[iris] = pixels([look, -0.55])
+        mesh[list(ring)] = pixels([[look+iris_r, -0.55], [look, -0.55-iris_r],
+                                  [look-iris_r, -0.55], [look, -0.55+iris_r]])
     mesh[1] = points[2]
     return row, roll, (yaw, pitch), mesh
 
@@ -163,20 +168,63 @@ class AcceptanceTests(unittest.TestCase):
                         self.assertAlmostEqual(system.estimate_distance(points, yaw, size), true,
                                                delta=true*0.002)
 
-    def test_pressing_z_makes_thirty_inches_exact_for_any_eye_gap(self):
+    def settle(self, eye_gap, inches=30, frames=12, center=(330, 230), start=0.0, face=None):
+        """Track one still person for a few frames so their iris measurement settles."""
+        face = face or system.Face(0)
+        for k in range(frames):
+            row, roll, pose, mesh = detection(inches, center, eye_gap=eye_gap)
+            system.update_face(face, row, roll, pose, start + k / 30, (640, 480), mesh)
+        return face
+
+    def test_children_and_adults_both_read_thirty_at_thirty_inches(self):
+        # Eye gaps from young children to wide-set adults. The iris is the same size in all of them.
+        for gap in (1.9, 2.1, 2.3, 2.5, 2.7, 2.9):
+            with self.subTest(eye_gap_mm=round(gap * 25.4)), patch.object(system, "DISTANCE_FOCAL", None):
+                face = self.settle(gap, frames=system.IRIS_MIN_SAMPLES - 1)
+                averaged = face.distance        # before enough frames: the average eye gap is assumed
+                face = self.settle(gap, frames=2, start=0.3, face=face)
+                self.assertAlmostEqual(face.eye_gap, gap, places=3)
+                self.assertAlmostEqual(face.distance, 30, places=2)
+                self.assertAlmostEqual(averaged, 30 * system.EYE_GAP_INCHES / gap, places=2)
+
+    def test_walking_in_does_not_change_the_measured_eye_gap(self):
+        # The iris and the eye gap grow together as someone walks closer, so the ratio holds.
+        with patch.object(system, "DISTANCE_FOCAL", None):
+            face = system.Face(0)
+            for k, inches in enumerate(np.linspace(48, 22, 30)):
+                row, roll, pose, mesh = detection(float(inches), eye_gap=2.1)
+                system.update_face(face, row, roll, pose, k / 30, (640, 480), mesh)
+                face.speed = 0.0   # the walk-in itself, not blur, is what this checks
+            self.assertAlmostEqual(face.eye_gap, 2.1, places=3)
+            self.assertAlmostEqual(face.distance, 22, places=2)
+
+    def test_looking_sideways_turning_or_blur_are_not_measured(self):
+        for kwargs, speed in [({"gaze": 0.5}, 0), ({"gaze": -0.5}, 0), ({"yaw": 30}, 0), ({}, 3.0)]:
+            with self.subTest(kwargs=kwargs, speed=speed):
+                face = system.Face(0)
+                for k in range(20):
+                    row, roll, pose, mesh = detection(30, eye_gap=2.0, **kwargs)
+                    system.update_face(face, row, roll, pose, k / 30, (640, 480), mesh)
+                    face.speed = speed
+                    face.iris_samples.clear() if speed and k == 0 else None
+                    if speed:
+                        self.assertIsNone(system.iris_sample(face, (640, 480)))
+                if not speed:
+                    self.assertFalse(face.iris_samples)
+                    self.assertIsNone(face.eye_gap)
+
+    def test_pressing_z_measures_the_camera_whoever_presses_it(self):
         size = (640, 480)
-        for gap in (2.0, 2.2, 2.5, 2.8):   # children to large adults
-            with self.subTest(gap=gap), patch.object(system, "DISTANCE_K", None), \
-                    patch.object(system, "EYE_GAP_INCHES", gap):
-                person = system.Face(0)
-                system.update_face(person, detection(30, (380, 200))[0], 0, (0, 0), 0, size)
-            with self.subTest(gap=gap), patch.object(system, "DISTANCE_K", system.distance_k_sample(person, size)):
-                for inches in (25, 29.99, 30, 30.01):
-                    with patch.object(system, "EYE_GAP_INCHES", gap):
-                        row = detection(inches, (300, 260), roll=20)[0]
-                    face = system.Face(1)
-                    system.update_face(face, row, 20, (0, 0), 1, size)
-                    self.assertAlmostEqual(face.distance, inches, places=3)
+        for presser in (2.0, 2.5, 2.8):   # a child, an average adult, a wide-set adult
+            with self.subTest(presser=presser), patch.object(system, "DISTANCE_FOCAL", 450.0):  # wrong guess
+                person = self.settle(presser, center=(380, 200))
+                focal = system.calibration_sample(person, size) / person.eye_gap
+                self.assertAlmostEqual(focal, system.FOCAL_PX, places=2)
+                with patch.object(system, "DISTANCE_FOCAL", focal):
+                    for other in (1.9, 2.5, 2.9):
+                        for inches in (25, 29.99, 30, 30.01):
+                            face = self.settle(other, inches, center=(300, 260))
+                            self.assertAlmostEqual(face.distance, inches, places=2)
 
     def test_profile_five_feet_two_second_crossing_five_trials(self):
         for actual in self.filters:
@@ -212,7 +260,8 @@ class AcceptanceTests(unittest.TestCase):
 
     def test_schedule_exact_cutoff_new_and_existing_visitors(self):
         for stamp, expected in [("16:14:59.999999", False), ("16:15:00", True),
-                                ("16:15:00.000001", True), ("23:59:59", True), ("00:00:00", False)]:
+                                ("16:15:00.000001", True), ("23:59:59", True), ("00:00:00", True),
+                                ("07:29:59.999999", True), ("07:30:00", False), ("12:00:00", False)]:
             self.assertEqual(system.filters_are_off(datetime.fromisoformat("2026-11-05T"+stamp)), expected)
         for actual in self.filters:
             faces, effect = {}, RecordingFilter(actual)

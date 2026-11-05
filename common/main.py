@@ -17,6 +17,8 @@ If MediaPipe isn't available, YuNet is used for compatible filters; iris filters
 TRACKER below can force one tracker for everything.
 
 Opt-in zone: distance comes from how far apart the eyes look on camera (see estimate_distance).
+Eyes are set closer together in kids and some adults, so each person's own eye gap is measured
+from the size of their iris, which is almost the same in everyone (see iris_sample).
 Filters show at 30 inches or closer: fully visible at 25 inches, fading out toward 30.
 Set it up once with a tape measure: stand with your eyes exactly 30 inches from the camera,
 look at the screen, and press z (or "Set 30-inch distance" in the staff controls).
@@ -61,6 +63,7 @@ import sys
 import tempfile
 import threading
 import time
+from collections import deque
 import urllib.request
 from datetime import datetime, time as dtime
 
@@ -99,7 +102,7 @@ USE_FADE_IN = True        # fade by distance between FADE_FULL_INCHES and ZONE_E
 USE_TIMER = True          # 1 minute note and 3 minute reminder
 USE_MULTI_USER = True     # everyone in view gets a filter (off = only the closest person)
 USE_ENGAGEMENT = True     # rotate between filters every FILTER_SWITCH_SECONDS ('n' still works when off)
-USE_SCHEDULE = True       # filters turn off at FILTERS_OFF_AT (computer's local time). Set to False
+USE_SCHEDULE = True       # filters are off from FILTERS_OFF_AT to FILTERS_ON_AT (local time). Set to False
                           # for after-school events like showcases
 USE_HINT_TEXT = True      # "Step up close..." message when nobody is using a filter
 
@@ -117,11 +120,17 @@ MEDIAPIPE_MAX_FACES = 8   # each extra face costs time on the Pi
 # Opt-in zone. Distance comes from how far apart the eyes look on screen (see estimate_distance).
 FOCAL_PX = 600            # camera focal length in pixels for a 640-wide picture (scaled to the real
                           # width automatically). Used for head angles and people off to the side
-EYE_GAP_INCHES = 2.5      # average distance between a person's eyes (only used until you press z)
+EYE_GAP_INCHES = 2.5      # average distance between a person's eyes, used until theirs is measured
 ZONE_ENTER_INCHES = 30    # filters show at or closer than this (2.5 ft)...
 FADE_FULL_INCHES = 25     # ...fully visible at or closer than this, fading out from here to 30 in
 FADE_START = 0.1          # opacity right at the edge of the zone (30 in)
 ZONE_CALIBRATE_SECONDS = 1.5   # pressing z averages the eye gap over this long
+# Each person's own eye gap, measured against their iris (MediaPipe only; YuNet uses the average)
+IRIS_MM = 11.7            # width of the coloured part of the eye: about the same in everyone over ~3
+IRIS_MIN_SAMPLES = 10     # good frames needed before a person's own eye gap replaces the average
+IRIS_MAX_TURN = 20        # only measure when the head faces the camera within this many degrees...
+IRIS_MAX_SPEED = 1.0      # ...isn't moving faster than this (face widths per second, blur)...
+IRIS_MIN_PX = 5           # ...and the iris is at least this many pixels wide
 
 MAX_ANGLE = 60            # filters show up to and including 60 degrees on every axis (turn, nod,
                           # tilt) and stop past that, e.g. a passerby in profile (90 degrees)
@@ -143,14 +152,18 @@ LOST_GRACE_SECONDS = 0.5      # keep a person around this long if the detector m
 # Engagement
 FILTER_SWITCH_SECONDS = 30    # rotate to the next filter this often
 
-# Schedule: filters turn off after dismissal so nobody heading to the buses gets stopped
-FILTERS_OFF_AT = dtime(16, 15)
+# Schedule: filters turn off after dismissal so nobody heading to the buses gets stopped,
+# and come back on in the morning
+FILTERS_OFF_AT = dtime(16, 15)   # 4:15 pm
+FILTERS_ON_AT = dtime(7, 30)     # 7:30 am
 
 
 def filters_are_off(local_now=None) -> bool:
-    """Use the display computer's local clock; the cutoff includes exactly 4:15pm."""
+    """Use the display computer's local clock. Off from exactly 4:15 pm, overnight, until exactly
+    7:30 am (7:30 itself is on)."""
     local_now = datetime.now() if local_now is None else local_now
-    return USE_SCHEDULE and local_now.time() >= FILTERS_OFF_AT
+    now = local_now.time()
+    return USE_SCHEDULE and (now >= FILTERS_OFF_AT or now < FILTERS_ON_AT)
 
 
 # Looking forward. The camera sits above or below the screen, so someone looking at the screen
@@ -159,7 +172,7 @@ def filters_are_off(local_now=None) -> bool:
 # them; they're saved to calibration.json (separately for YuNet and MediaPipe) and loaded every time.
 CALIBRATION_PATH = os.path.join(COMMON_DIR, "calibration.json")
 FORWARD = {"yaw": 0.0, "pitch": 0.0}
-DISTANCE_K = None         # eye gap in pixels x inches, measured by pressing z (None = use the averages)
+DISTANCE_FOCAL = None     # the camera's focal length in pixels, measured by pressing z (None = FOCAL_PX)
 POSE_LOG_PATH = os.path.join(COMMON_DIR, "pose_log.csv")
 
 
@@ -409,9 +422,11 @@ def load_calibration():
             angles = {axis: float(values.get(axis, 0)) for axis in ("yaw", "pitch")}
             if all(math.isfinite(v) and abs(v) <= 90 for v in angles.values()):
                 clean[tracker] = angles
-                k = float(values.get("distance_k", 0) or 0)
-                if math.isfinite(k) and k > 0:
-                    clean.setdefault(tracker, {})["distance_k"] = k
+                focal = float(values.get("distance_focal", 0) or 0)
+                if not focal and values.get("distance_k"):   # saved by an older version
+                    focal = float(values["distance_k"]) / EYE_GAP_INCHES
+                if math.isfinite(focal) and focal > 0:
+                    clean[tracker]["distance_focal"] = focal
         return clean
     except (OSError, ValueError, TypeError) as error:
         print(f"Ignoring invalid calibration ({error}); press c to recalibrate.")
@@ -580,6 +595,8 @@ class Face:
         self.speed = 0.0        # face widths per second
         # system state (filters don't need these)
         self.point_filter = Smoother()
+        self.iris_samples = deque(maxlen=90)   # (eye gap in inches, iris width in pixels) from good frames
+        self.eye_gap = None     # this person's own eye gap in inches, once IRIS_MIN_SAMPLES are in
         self.pose_guess = None  # last 3D head pose, used as the starting point for the next frame
         self.tilt = None        # current tilt: MediaPipe pose or YuNet optical flow
         self.landmarks = None   # current-frame iris/eyelid points; None for YuNet
@@ -724,22 +741,74 @@ def off_axis(p: np.ndarray, frame_size: tuple) -> float:
     return math.hypot((mid[0] - w / 2) / FOCAL_PX, (mid[1] - h / 2) / FOCAL_PX, 1.0)
 
 
-def estimate_distance(p: np.ndarray, raw_yaw: float, frame_size: tuple) -> float:
+def estimate_distance(p: np.ndarray, raw_yaw: float, frame_size: tuple, gap_inches: float = None) -> float:
     """Inches from the camera to the point between the eyes.
 
     An eye gap G inches wide at depth Z looks k = f * G / Z pixels wide when facing the camera
-    (frontal_eye_gap undoes a head turn), so Z = (f * G) / k and the distance is Z * off_axis.
-    Pressing z measures K = f * G directly with someone standing exactly ZONE_ENTER_INCHES away,
-    which makes the zone edge exact for this camera, its settings and this tracker. Before that,
-    the average eye gap and FOCAL_PX are used."""
-    k = DISTANCE_K or FOCAL_PX * EYE_GAP_INCHES
-    return k / frontal_eye_gap(p, raw_yaw, frame_size) * off_axis(p, frame_size)
+    (frontal_eye_gap undoes a head turn), so Z = f * G / k and the distance is Z * off_axis.
+    G is this person's own eye gap (gap_inches, measured from their iris) or the average.
+    f is the camera's focal length, measured by pressing z with someone exactly ZONE_ENTER_INCHES
+    away, which makes the zone edge exact for this camera and its settings."""
+    focal = DISTANCE_FOCAL or FOCAL_PX
+    gap = gap_inches or EYE_GAP_INCHES
+    return focal * gap / frontal_eye_gap(p, raw_yaw, frame_size) * off_axis(p, frame_size)
 
 
-def distance_k_sample(face, frame_size: tuple, inches: float = None) -> float:
-    """K for someone standing exactly `inches` away (estimate_distance run backwards)."""
+def calibration_sample(face, frame_size: tuple, inches: float = None) -> float:
+    """f * G for someone standing exactly `inches` away (estimate_distance run backwards).
+    Divide by their eye gap to get the camera's focal length."""
     inches = ZONE_ENTER_INCHES if inches is None else inches
     return frontal_eye_gap(face.points, face.raw_yaw, frame_size) * inches / off_axis(face.points, frame_size)
+
+
+# MediaPipe points for each eye: iris centre, iris edge left/right, iris edge top/bottom, eye corners
+IRIS_EYES = ((468, (469, 471), (470, 472), (33, 133)),
+             (473, (474, 476), (475, 477), (362, 263)))
+
+
+def iris_sample(face, frame_size: tuple):
+    """This frame's measurement of the person's own eye gap, as (inches, iris width in pixels),
+    or None if the frame isn't good enough to measure from.
+
+    The iris is about IRIS_MM wide in everyone, so eye gap = IRIS_MM * (eye gap px / iris px).
+    Both are measured in the same frame, so walking toward or away from the camera cancels out.
+    Frames are skipped when the head is turned, the eyes look sideways (the iris then looks
+    narrower), the face is moving fast (blur), or the iris is too small to measure."""
+    lm = face.landmarks
+    if lm is None or lm.shape != (478, 2) or not np.isfinite(lm).all():
+        return None
+    if not (math.isfinite(face.raw_yaw) and math.isfinite(face.raw_pitch)):
+        return None
+    if max(abs(face.raw_yaw), abs(face.raw_pitch)) > IRIS_MAX_TURN or face.speed > IRIS_MAX_SPEED:
+        return None
+    widths = []
+    for centre, across, down, (corner_a, corner_b) in IRIS_EYES:
+        axis = lm[corner_b] - lm[corner_a]
+        length = float(axis @ axis)
+        if length < 1.0:
+            return None
+        if not 0.38 <= float((lm[centre] - lm[corner_a]) @ axis) / length <= 0.62:
+            return None   # looking sideways (the iris would look narrower)
+        # Average both ways across: taking the larger of two noisy widths would read too big
+        widths.append((float(np.linalg.norm(lm[across[0]] - lm[across[1]])) +
+                       float(np.linalg.norm(lm[down[0]] - lm[down[1]]))) / 2)
+    iris_px = sum(widths) / len(widths)
+    if iris_px < IRIS_MIN_PX:
+        return None
+    inches = IRIS_MM / 25.4 * frontal_eye_gap(face.points, face.raw_yaw, frame_size) / iris_px
+    return (inches, iris_px) if 1.6 <= inches <= 3.2 else None   # 40-80 mm, else a bad detection
+
+
+def weighted_median(samples) -> float:
+    """Median of (value, weight) pairs. Closer frames (bigger iris) count for more."""
+    ordered = sorted(samples)
+    half = sum(w for _, w in ordered) / 2
+    total = 0.0
+    for value, weight in ordered:
+        total += weight
+        if total >= half:
+            return value
+    return ordered[-1][0]
 
 
 def update_face(face: Face, det: np.ndarray, tilt, pose, now: float, frame_size: tuple, landmarks=None) -> None:
@@ -752,6 +821,8 @@ def update_face(face: Face, det: np.ndarray, tilt, pose, now: float, frame_size:
     # A long detection gap starts a new fade for a returning face.
     if dt > LOST_GRACE_SECONDS:
         reset_activation(face)
+        face.iris_samples.clear()   # could be someone else now
+        face.eye_gap = None
     face.landmarks = landmarks
     face.points = raw_points(det)
     face.point_filter(face.points, dt, scale)
@@ -778,7 +849,12 @@ def update_face(face: Face, det: np.ndarray, tilt, pose, now: float, frame_size:
     # Use current geometry for all renderers: smoothing scale/anchors leaves an uncovered
     # nose on an approach and trails behind a head sway, especially at close distances.
     face.size = face_size(face.points, face.raw_yaw, face.raw_pitch)
-    face.distance = estimate_distance(face.points, face.raw_yaw, frame_size)
+    sample = iris_sample(face, frame_size)
+    if sample:
+        face.iris_samples.append(sample)
+    if len(face.iris_samples) >= IRIS_MIN_SAMPLES:
+        face.eye_gap = weighted_median(face.iris_samples)
+    face.distance = estimate_distance(face.points, face.raw_yaw, frame_size, face.eye_gap)
     face.last_seen = now
 
 
@@ -886,6 +962,9 @@ def draw_debug(frame, face: Face) -> None:
     cv2.rectangle(frame, (x, y), (x + w, y + h), color, 1)
     draw_text(frame, f"#{face.id} {face.distance:.0f}in yaw{face.yaw:.0f} pitch{face.pitch:.0f} roll{face.roll:.0f}",
               x + w / 2, y + h + 20, 0.4, color)
+    eyes = f"eye gap {face.eye_gap * 25.4:.0f}mm (measured)" if face.eye_gap else \
+        f"eye gap {EYE_GAP_INCHES * 25.4:.0f}mm (average, measuring {len(face.iris_samples)}/{IRIS_MIN_SAMPLES})"
+    draw_text(frame, eyes, x + w / 2, y + h + 36, 0.4, color)
 
 
 def process_faces(frame, faces, filters, active, now, dt, filters_off=None, draw_notes=True):
@@ -939,7 +1018,7 @@ def save_calibration(saved: dict, what: str = None) -> None:
 
 
 def main(argv=None):
-    global FOCAL_PX, MEDIAPIPE_MAX_FACES, DISTANCE_K
+    global FOCAL_PX, MEDIAPIPE_MAX_FACES, DISTANCE_FOCAL
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("filters", nargs="*", help="Available: " + ", ".join(FILTERS) +
                         " (astronaut is an alias for helmet)")
@@ -1047,7 +1126,7 @@ def main(argv=None):
                 faces.clear()
                 mine = saved.get(tracker, {})
                 FORWARD.update(yaw=mine.get("yaw", 0.0), pitch=mine.get("pitch", 0.0))
-                DISTANCE_K = mine.get("distance_k")
+                DISTANCE_FOCAL = mine.get("distance_focal")
 
             tracked = [(f.nose, f.tilt, f.size) for f in faces.values()]
             track(faces, detector.detect(frame, tracked), now, next_id, (w, h))
@@ -1062,12 +1141,17 @@ def main(argv=None):
             if zone_cal is not None:
                 if seen_faces:
                     closest = max(seen_faces, key=lambda f: f.size)
-                    zone_cal["samples"].append(distance_k_sample(closest, (w, h)))
+                    zone_cal["samples"].append(calibration_sample(closest, (w, h)))
+                    zone_cal["gap"] = closest.eye_gap   # their own eye gap, refined while they stand there
                 if now >= zone_cal["until"]:
                     if len(zone_cal["samples"]) >= 5:
-                        DISTANCE_K = float(np.median(zone_cal["samples"]))
-                        saved.setdefault(tracker, {})["distance_k"] = round(DISTANCE_K, 3)
-                        save_calibration(saved, f"Set the {ZONE_ENTER_INCHES}-inch distance for {tracker}")
+                        gap = zone_cal.get("gap") or EYE_GAP_INCHES
+                        DISTANCE_FOCAL = float(np.median(zone_cal["samples"])) / gap
+                        saved.setdefault(tracker, {})["distance_focal"] = round(DISTANCE_FOCAL, 3)
+                        saved[tracker].pop("distance_k", None)
+                        whose = "your measured" if zone_cal.get("gap") else "the average"
+                        save_calibration(saved, f"Set the {ZONE_ENTER_INCHES}-inch distance for {tracker} "
+                                                f"(using {whose} eye gap, {gap * 25.4:.0f} mm)")
                         zone_note = f"Done: {ZONE_ENTER_INCHES} inches is set"
                     else:
                         zone_note = "Couldn't see a face. Stand 30 in away, look at the screen, try again"
@@ -1107,7 +1191,7 @@ def main(argv=None):
                 if firm:
                     draw_text(frame, "3 minutes! Time to get back to your work.", w / 2, 40, 0.8, (0, 200, 255), 2)
                 if filters_off:
-                    draw_text(frame, "Filters are off for the day", w / 2, h - 16, 0.5, (200, 200, 200))
+                    draw_text(frame, "Filters are off right now. They're back at 7:30 a.m.", w / 2, h - 16, 0.5, (200, 200, 200))
                 elif USE_HINT_TEXT and not anyone:
                     draw_text(frame, "Step up close and look here to try a filter", w / 2, h - 16, 0.5, (255, 255, 255))
                 draw_text(frame, "This camera doesn't record: pictures never leave this computer and are never saved.",

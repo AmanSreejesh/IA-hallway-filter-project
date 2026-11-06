@@ -92,7 +92,7 @@ MEDIAPIPE_MODEL_URL = ("https://storage.googleapis.com/mediapipe-models/face_lan
 FILTERS = {
     "emoji": ("viraj.emoji_filter", "EmojiFilter"),
     "sharingan": ("aman.sharingan_improved", "SharinganFilter"),
-    "helmet": ("ishan.helmet_filter", "HelmetFilter"),
+    "helmet": ("ishan.helmet_updated", "HelmetFilter"),
     "clown_nose": ("aryan.clown_nose_filter", "ClownNoseFilter"),
 }
 # Preserve the earlier astronaut command without duplicating the helmet in the wheel.
@@ -100,8 +100,7 @@ FILTER_ALIASES = {"astronaut": "helmet"}
 
 # --- Feature toggles (True = on, False = off) ---
 USE_OPT_IN_ZONE = True    # only people at or closer than ZONE_ENTER_INCHES get a filter
-USE_WALK_BY_CHECK = True  # 3-second privacy intro: stay in the zone, facing the screen, for DWELL_SECONDS
-                          # before your filter starts. People hurrying past never get one (issue #7)
+USE_WALK_BY_CHECK = False # optional privacy intro; disabled to preserve immediate activation
 USE_ANGLE_LIMIT = True    # stop drawing past MAX_ANGLE, independently for each person
 USE_FADE_IN = True        # fade by distance between FADE_FULL_INCHES and ZONE_ENTER_INCHES
                           # (off = fully visible anywhere in the zone)

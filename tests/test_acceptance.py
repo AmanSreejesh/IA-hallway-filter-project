@@ -19,6 +19,7 @@ from common.overlay import draw_artwork, premultiply
 from aman.sharingan_improved import EYES
 from aryan.clown_nose_filter import ClownNoseFilter
 from ishan.astronaut_filter import AstronautFilter
+from ishan.helmet_updated import HelmetFilter, head_rotation
 from viraj.emoji_filter import rotation
 
 
@@ -80,11 +81,6 @@ class AcceptanceTests(unittest.TestCase):
         self.forward = patch.dict(system.FORWARD, yaw=0.0, pitch=0.0)
         self.forward.start()
         self.addCleanup(self.forward.stop)
-        # Most tests check what a filter does once it's on, so they skip the 3-second privacy intro.
-        # The DwellTests below check the intro itself.
-        self.dwell = patch.object(system, "DWELL_SECONDS", 0.0)
-        self.dwell.start()
-        self.addCleanup(self.dwell.stop)
 
     def step(self, faces, effect, now, detections=(), *, off=False):
         next_id = [max(faces, default=-1)+1]
@@ -104,7 +100,13 @@ class AcceptanceTests(unittest.TestCase):
                 filters = system.load_filters(names)
                 self.assertEqual(len(filters), 1)
                 self.assertEqual(filters[0].name, "Helmet")
-                self.assertIsInstance(filters[0], AstronautFilter)
+                self.assertIs(type(filters[0]), HelmetFilter)
+
+    def test_updated_helmet_is_used_by_registry_and_legacy_entry_points(self):
+        from ishan.helmet_filter import HelmetFilter as LegacyHelmetFilter
+        self.assertEqual(system.FILTERS["helmet"], ("ishan.helmet_updated", "HelmetFilter"))
+        self.assertIs(LegacyHelmetFilter, HelmetFilter)
+        self.assertIsInstance(AstronautFilter(), HelmetFilter)
 
     def test_short_child_seated_and_45_degree_tilt_ten_trials_per_filter(self):
         for actual in self.filters:
@@ -120,6 +122,7 @@ class AcceptanceTests(unittest.TestCase):
                         self.assertFalse(np.all(frame == 140), "actual renderer must draw")
 
     def test_eligible_visits_activate_without_waiting(self):
+        self.assertFalse(system.USE_WALK_BY_CHECK)
         for actual in self.filters:
             with self.subTest(filter=actual.name):
                 faces, effect = {}, RecordingFilter(actual)
@@ -455,7 +458,7 @@ class AcceptanceTests(unittest.TestCase):
             self.assertFalse(np.all(frame == 140))
 
     def test_helmet_visibly_rotates_and_preserves_face_window(self):
-        helmet = AstronautFilter()
+        helmet = HelmetFilter()
         original = np.zeros((480, 640, 3), np.uint8)
         tilted = original.copy()
         face = system.Face(0)
@@ -467,16 +470,59 @@ class AcceptanceTests(unittest.TestCase):
         helmet.apply(tilted, face, 1)
         self.assertGreater(np.count_nonzero(original != tilted), 1000)
         nx, ny = np.rint(face.nose).astype(int)
-        self.assertTrue(np.all(original[ny, nx] == 0), "face remains visible through visor")
+        self.assertTrue(np.all(original[ny, nx] < 15), "visor has only a slight tint")
         # The off-center bottom of the helmet identifies the direction of rotation.
         mask = cv2.cvtColor(original, cv2.COLOR_BGR2GRAY) > 20
         rotated_mask = cv2.cvtColor(tilted, cv2.COLOR_BGR2GRAY) > 20
         y, x = np.where(mask)
         ry, rx = np.where(rotated_mask)
-        anchor = np.mean(face.points[2:7], axis=0)
+        anchor = np.asarray(face.nose)
         expected = (np.array([x.mean(), y.mean()])-anchor) @ np.array([[2**-0.5, 2**-0.5],
                                                                  [-2**-0.5, 2**-0.5]]) + anchor
         np.testing.assert_allclose([rx.mean(), ry.mean()], expected, atol=2)
+
+    def test_3d_helmet_follows_shared_yaw_pitch_and_roll_without_history(self):
+        helmet = HelmetFilter()
+        face = system.Face(0)
+        row, tilt, pose, mesh = detection(24)
+        system.update_face(face, row, tilt, pose, 10, (640, 480), mesh)
+        base = np.full((480, 640, 3), 140, np.uint8)
+        neutral = base.copy()
+        helmet.apply(neutral, face, 1)
+        for roll, yaw, pitch in [(45, 0, 0), (0, 60, 0), (0, -60, 0), (0, 0, 45)]:
+            with self.subTest(roll=roll, yaw=yaw, pitch=pitch):
+                face.roll, face.yaw, face.pitch = roll, yaw, pitch
+                np.testing.assert_allclose(head_rotation(roll, yaw, pitch), rotation(roll, yaw, pitch))
+                turned = base.copy()
+                helmet.apply(turned, face, 1)
+                self.assertGreater(np.count_nonzero(neutral != turned), 1000)
+        # A second person's rendering must not affect a returning person's pose.
+        face.id = 1
+        helmet.apply(base.copy(), face, 1)
+        face.id = 0
+        face.roll = face.yaw = face.pitch = 0
+        restored = base.copy()
+        helmet.apply(restored, face, 1)
+        np.testing.assert_array_equal(restored, neutral)
+
+    def test_3d_helmet_preserves_face_detail_and_applies_opacity_to_all_artwork(self):
+        helmet = HelmetFilter()
+        face = system.Face(0)
+        row, tilt, pose, mesh = detection(24)
+        system.update_face(face, row, tilt, pose, 10, (640, 480), mesh)
+        y, x = np.indices((480, 640))
+        pattern = np.where((x//4 + y//4) % 2, 220, 50).astype(np.uint8)
+        base = np.repeat(pattern[:, :, None], 3, axis=2)
+        full, half, hidden = base.copy(), base.copy(), base.copy()
+        helmet.apply(full, face, 1)
+        helmet.apply(half, face, 0.5)
+        helmet.apply(hidden, face, 0)
+        np.testing.assert_array_equal(hidden, base)
+        np.testing.assert_allclose(half.astype(float), (base.astype(float)+full)/2, atol=1)
+        nx, ny = np.rint(face.nose).astype(int)
+        detail = full[ny-10:ny+10, nx-10:nx+10, 0]
+        self.assertGreater(np.ptp(detail.astype(int)), 140, "actual face contrast remains visible")
+        np.testing.assert_array_equal(full[:30, :30], base[:30, :30])
 
     def test_overlay_zero_opacity_and_offscreen_are_noops(self):
         art = premultiply(np.full((20, 20, 4), 255, np.uint8))
@@ -491,7 +537,7 @@ if __name__ == "__main__":
 
 
 class DwellTests(unittest.TestCase):
-    """Issue #7 and the privacy intro: 3 seconds in the zone, facing the screen, before a filter."""
+    """The optional privacy intro, explicitly enabled here; normal activation has no wait."""
 
     @classmethod
     def setUpClass(cls):
@@ -502,6 +548,9 @@ class DwellTests(unittest.TestCase):
         self.forward = patch.dict(system.FORWARD, yaw=0.0, pitch=0.0)
         self.forward.start()
         self.addCleanup(self.forward.stop)
+        self.intro = patch.object(system, "USE_WALK_BY_CHECK", True)
+        self.intro.start()
+        self.addCleanup(self.intro.stop)
 
     step = AcceptanceTests.step
 

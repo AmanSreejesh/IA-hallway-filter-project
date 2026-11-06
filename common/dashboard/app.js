@@ -204,6 +204,9 @@ function render() {
   $("debug").textContent = `Debug view: ${state.debug ? "on" : "off"}`;
   $("staffInfo").textContent = `${state.tracker}, ${state.fps} frames a second. ${state.zone_note || ""}`;
   updatePrivacy();
+  timerBase = state.timer;   // seconds, or null when nobody has a filter
+  timerAt = performance.now();
+  showTimer();
   if (sel < 0) draw();
 }
 
@@ -338,31 +341,65 @@ function isKiosk() { return window.innerHeight >= screen.height - 2 && window.in
 window.addEventListener("resize", () => { size = wheel.offsetWidth; draw(); });
 document.addEventListener("contextmenu", (e) => e.preventDefault());
 
-// ---------- privacy card: hidden by its button, fades back once that person has left ----------
-// Someone right at the touchscreen is often too close for the camera to see, so this doesn't wait
-// to "see them leave": it comes back once nobody has been in view for a moment, but never sooner
-// than PRIVACY_MIN_HIDDEN after the tap.
-const PRIVACY_BACK_AFTER = 2;       // seconds with nobody in view (measured by main.py)
-const PRIVACY_MIN_HIDDEN = 4000;    // ms
-let privacyHidden = false;
-let privacyHiddenAt = 0;
+// ---------- timer: counts up smoothly between the once-a-second updates ----------
+let timerBase = null;
+let timerAt = 0;
+function showTimer() {
+  const box = $("timer");
+  const on = timerBase != null && !isLost && !(state && state.off);
+  box.classList.toggle("on", on);
+  if (!on) return;
+  const t = Math.max(0, timerBase + (performance.now() - timerAt) / 1000);
+  $("timerText").textContent = `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, "0")}`;
+  // The ring fills up to the 1-minute note, then again up to the 3-minute reminder
+  const part = t < 60 ? t / 60 : Math.min(1, (t - 60) / 120);
+  $("timerFill").style.strokeDashoffset = String(56.55 * (1 - part));
+  box.classList.toggle("late", t >= 60);
+}
+setInterval(showTimer, 250);
 
-$("privacy").addEventListener("pointerdown", (e) => e.stopPropagation());   // not a tap on the picture
-$("privacyHide").addEventListener("click", () => {
-  privacyHidden = true;
-  privacyHiddenAt = performance.now();
-  $("privacy").classList.add("away");
-  setTimeout(updatePrivacy, PRIVACY_MIN_HIDDEN + 50);
-});
+// ---------- privacy: corner card, and the 3-second intro before a filter starts ----------
+// The corner card is up whenever nobody is using a filter. When someone walks up, main.py waits
+// DWELL_SECONDS before starting their filter (so people hurrying past never get one), and the page
+// shows the privacy note in the middle with a countdown meanwhile. The corner card comes back once
+// nobody has been in view for a moment, or nobody has used a filter for a while.
+const PRIVACY_BACK_AFTER = 2;       // seconds with nobody in view (measured by main.py)
+const PRIVACY_IDLE_BACK = 5000;     // ms with nobody using a filter
+let privacyAway = false;
+let lastBusy = 0;
+let introStart = null;
+let introMs = 3000;
 
 function updatePrivacy() {
-  if (!privacyHidden || !state) return;
-  if (performance.now() - privacyHiddenAt < PRIVACY_MIN_HIDDEN) return;
-  if (isLost || (state.empty_for ?? 0) >= PRIVACY_BACK_AFTER) {   // lost the program: show it anyway
-    privacyHidden = false;
-    $("privacy").classList.remove("away");
+  if (!state) return;
+  const now = performance.now();
+  const intro = state.intro != null && !isLost && !state.off;
+  introMs = (state.dwell || 3) * 1000;
+  if (intro) {
+    if (introStart == null) introStart = now - state.intro * introMs;
+  } else {
+    introStart = null;
   }
+  $("intro").classList.toggle("on", intro && performance.now() - introStart < introMs);
+  showIntro();
+
+  if (intro || state.active) {
+    privacyAway = true;
+    lastBusy = now;
+  } else if (privacyAway && (isLost || (state.empty_for ?? 0) >= PRIVACY_BACK_AFTER || now - lastBusy >= PRIVACY_IDLE_BACK)) {
+    privacyAway = false;
+  }
+  $("privacy").classList.toggle("away", privacyAway);
 }
+
+function showIntro() {
+  if (introStart == null) return;
+  const done = Math.min(1, (performance.now() - introStart) / introMs);
+  $("introFill").style.strokeDashoffset = String(125.66 * (1 - done));
+  $("introNum").textContent = String(Math.max(1, Math.ceil((introMs / 1000) * (1 - done))));
+  if (done >= 1) $("intro").classList.remove("on");   // countdown over: don't wait for the next update
+}
+setInterval(showIntro, 50);
 
 // ---------- staff: hold the top-left corner for 2 seconds ----------
 let holdTimer = 0;

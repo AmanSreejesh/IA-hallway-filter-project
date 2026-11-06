@@ -80,6 +80,11 @@ class AcceptanceTests(unittest.TestCase):
         self.forward = patch.dict(system.FORWARD, yaw=0.0, pitch=0.0)
         self.forward.start()
         self.addCleanup(self.forward.stop)
+        # Most tests check what a filter does once it's on, so they skip the 3-second privacy intro.
+        # The DwellTests below check the intro itself.
+        self.dwell = patch.object(system, "DWELL_SECONDS", 0.0)
+        self.dwell.start()
+        self.addCleanup(self.dwell.stop)
 
     def step(self, faces, effect, now, detections=(), *, off=False):
         next_id = [max(faces, default=-1)+1]
@@ -118,8 +123,7 @@ class AcceptanceTests(unittest.TestCase):
         for actual in self.filters:
             with self.subTest(filter=actual.name):
                 faces, effect = {}, RecordingFilter(actual)
-                # Even a brief, fast crossing activates while eligible. The removed
-                # three-second rejection rule must not become a hidden delay again.
+                # With the privacy intro off, a brief, fast crossing activates while eligible.
                 for elapsed in (0, 0.1, 0.2):
                     center = (160+1000*elapsed, 240)
                     frame, _ = self.step(faces, effect, 10+elapsed, [detection(24, center)])
@@ -292,8 +296,46 @@ class AcceptanceTests(unittest.TestCase):
             self.assertAlmostEqual(effect.calls[-1][1], 1.0)   # back immediately, at 24 in
             self.assertEqual(len(effect.calls), calls+1)
             self.step(faces, effect, 11.2)
+            self.assertIn(0, faces)   # their timer is still running, so they're kept for a moment
+            self.step(faces, effect, 10.6 + system.TIMER_RESET_SECONDS + 0.1)
             self.assertEqual(faces, {})
             self.assertEqual(effect.forgotten, [0])
+
+    def run_timer(self, until, gaps=(), start=100.0, step=0.5):
+        """One person in the zone from `start` to `until` seconds later, with the camera missing
+        them during each (from, to) gap. Returns the (gentle, firm) seen at every step."""
+        faces, effect = {}, RecordingFilter(self.filters[0])
+        seen = []
+        for t in np.arange(0, until + 1e-9, step):
+            missing = any(a <= t < b for a, b in gaps)
+            _, (_, firm, _, gentle) = self.step(faces, effect, start + float(t), [] if missing else [detection()])
+            seen.append((float(t), gentle, firm))
+        return faces, seen
+
+    def test_one_minute_note_shows_after_a_minute(self):
+        _, seen = self.run_timer(75)
+        gentle_at = [t for t, g, _ in seen if g]
+        self.assertTrue(gentle_at)
+        self.assertAlmostEqual(gentle_at[0], system.TIMER_GENTLE_SECONDS, delta=0.5)
+        self.assertLessEqual(gentle_at[-1], system.TIMER_GENTLE_SECONDS + system.GENTLE_SHOW_SECONDS)
+        self.assertFalse(any(f for _, _, f in seen))
+
+    def test_three_minute_reminder_shows_and_stays(self):
+        _, seen = self.run_timer(200)
+        firm_at = [t for t, _, f in seen if f]
+        self.assertAlmostEqual(firm_at[0], system.TIMER_FIRM_SECONDS, delta=0.5)
+        self.assertTrue(all(f for t, _, f in seen if t >= system.TIMER_FIRM_SECONDS))
+
+    def test_camera_losing_the_face_briefly_keeps_the_timer(self):
+        # Dropouts of 1-4 seconds (detection misses, a glance down at a test) don't restart it
+        _, seen = self.run_timer(75, gaps=[(20, 21), (35, 39), (50, 51.5)])
+        gentle_at = [t for t, g, _ in seen if g]
+        self.assertTrue(gentle_at)
+        self.assertAlmostEqual(gentle_at[0], system.TIMER_GENTLE_SECONDS, delta=0.5)
+
+    def test_stepping_away_resets_the_timer(self):
+        _, seen = self.run_timer(75, gaps=[(30, 30 + system.TIMER_RESET_SECONDS + 1)])
+        self.assertFalse(any(g for t, g, _ in seen if t < 30 + system.TIMER_RESET_SECONDS + 1 + 59))
 
     def test_no_fade_activates_immediately_at_full_opacity(self):
         with patch.object(system, "USE_FADE_IN", False):
@@ -446,3 +488,60 @@ class AcceptanceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DwellTests(unittest.TestCase):
+    """Issue #7 and the privacy intro: 3 seconds in the zone, facing the screen, before a filter."""
+
+    @classmethod
+    def setUpClass(cls):
+        with patch("viraj.emoji_filter.RENDERER", "software"), contextlib.redirect_stdout(io.StringIO()):
+            cls.filters = system.load_filters([])
+
+    def setUp(self):
+        self.forward = patch.dict(system.FORWARD, yaw=0.0, pitch=0.0)
+        self.forward.start()
+        self.addCleanup(self.forward.stop)
+
+    step = AcceptanceTests.step
+
+    def visit(self, frames):
+        """frames: list of (time, detection or None). Returns the times a filter was drawn."""
+        faces, effect = {}, RecordingFilter(self.filters[0])
+        drawn = []
+        for now, det in frames:
+            before = len(effect.calls)
+            self.step(faces, effect, now, [det] if det is not None else [])
+            if len(effect.calls) > before:
+                drawn.append(now)
+        return faces, drawn
+
+    def test_hurrying_through_in_under_three_seconds_never_gets_a_filter_ten_trials(self):
+        for trial in range(10):
+            with self.subTest(trial=trial):
+                _, drawn = self.visit([(10 + t, detection(26, (150 + 150 * t, 240)))
+                                       for t in np.arange(0, 2.9, 0.1)])
+                self.assertEqual(drawn, [])
+
+    def test_filter_starts_after_three_seconds_in_the_zone(self):
+        faces, drawn = self.visit([(10 + t, detection()) for t in np.arange(0, 4.01, 0.1)])
+        self.assertTrue(drawn)
+        self.assertAlmostEqual(drawn[0], 10 + system.DWELL_SECONDS, delta=0.1)
+        self.assertTrue(faces[0].opted_in)
+
+    def test_a_blink_does_not_restart_the_three_seconds(self):
+        frames = [(10 + t, None if 1.5 <= t < 1.8 else detection()) for t in np.arange(0, 4.01, 0.1)]
+        _, drawn = self.visit(frames)
+        self.assertAlmostEqual(drawn[0], 10 + system.DWELL_SECONDS, delta=0.1)
+
+    def test_stepping_out_restarts_the_three_seconds(self):
+        frames = [(10 + t, detection(40) if 1.5 <= t < 2.5 else detection()) for t in np.arange(0, 6.01, 0.1)]
+        _, drawn = self.visit(frames)
+        self.assertAlmostEqual(drawn[0], 10 + 2.5 + system.DWELL_SECONDS, delta=0.15)
+
+    def test_coming_back_soon_after_skips_the_intro(self):
+        frames = [(10 + t, detection()) for t in np.arange(0, 4.01, 0.1)]
+        frames += [(14 + t, detection(40)) for t in np.arange(0.1, 2.01, 0.1)]   # steps back 2 s
+        frames += [(16 + t, detection()) for t in np.arange(0.1, 1.01, 0.1)]     # comes back
+        _, drawn = self.visit(frames)
+        self.assertIn(round(16.1, 6), [round(t, 6) for t in drawn])   # straight back on, no 3 s wait

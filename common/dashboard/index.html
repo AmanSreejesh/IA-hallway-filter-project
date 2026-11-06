@@ -12,15 +12,29 @@
 
 <p class="pill pill-top" id="message" role="status"></p>
 
-<!-- Privacy: on screen until someone hides it, and fades back once they've left.
-     Every line here must stay true of this kiosk. -->
+<!-- Privacy. Every line here must stay true of this kiosk.
+     In the corner whenever nobody is using a filter. When someone walks up, the note shows in the
+     middle for 3 seconds before their filter starts (people hurrying past never get a filter). -->
 <aside class="privacy" id="privacy" aria-label="Privacy">
   <p class="privacy-head">This camera doesn't record</p>
   <p>It shows you on this screen and finds faces so the filters can follow them.</p>
   <p>Pictures never leave this computer and are never saved. Each one is gone right after it's shown.</p>
   <p>To stay off the screen, step out of the camera's view. Filters only appear within 2.5 feet.</p>
-  <button class="privacy-hide" id="privacyHide" type="button">Hide</button>
 </aside>
+
+<div class="card-wrap" id="intro">
+  <div class="card intro" role="dialog" aria-label="Before your filter starts">
+    <p class="card-big">This camera doesn't record</p>
+    <p class="intro-line">It shows you on this screen and finds faces so the filters can follow them.</p>
+    <p class="intro-line">Pictures never leave this computer and are never saved.</p>
+    <p class="intro-line">To stay off the screen, step out of the camera's view.</p>
+    <div class="intro-count">
+      <svg viewBox="0 0 48 48" aria-hidden="true"><circle cx="24" cy="24" r="20" class="intro-track"/><circle cx="24" cy="24" r="20" class="intro-fill" id="introFill"/></svg>
+      <span class="intro-num" id="introNum">3</span>
+    </div>
+    <p class="card-small">Your filter starts in a moment</p>
+  </div>
+</div>
 <p class="pill pill-name" id="name"></p>
 
 <div class="card-wrap" id="firm">
@@ -43,6 +57,11 @@
 </div>
 
 <!-- Staff only: hold the top-left corner for 2 seconds -->
+<!-- Timer: how long the person at the screen has had a filter. The ring fills to 1 minute, then to 3. -->
+<p class="timer" id="timer" role="timer" aria-label="Time with a filter">
+  <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" class="timer-track"/><circle cx="12" cy="12" r="9" class="timer-fill" id="timerFill"/></svg>
+  <span id="timerText">0:00</span>
+</p>
 <div class="corner" id="corner" aria-hidden="true"></div>
 <div class="card-wrap staff" id="staff" hidden>
   <div class="card">

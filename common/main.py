@@ -96,6 +96,8 @@ FILTER_ALIASES = {"astronaut": "helmet"}
 
 # --- Feature toggles (True = on, False = off) ---
 USE_OPT_IN_ZONE = True    # only people at or closer than ZONE_ENTER_INCHES get a filter
+USE_WALK_BY_CHECK = True  # 3-second privacy intro: stay in the zone, facing the screen, for DWELL_SECONDS
+                          # before your filter starts. People hurrying past never get one (issue #7)
 USE_ANGLE_LIMIT = True    # stop drawing past MAX_ANGLE, independently for each person
 USE_FADE_IN = True        # fade by distance between FADE_FULL_INCHES and ZONE_ENTER_INCHES
                           # (off = fully visible anywhere in the zone)
@@ -144,8 +146,9 @@ MOVING_RESPONSE = 5.0     # higher = catches up faster when you move (try 2 to 1
 # Timer
 TIMER_GENTLE_SECONDS = 60     # small note that a minute has passed
 TIMER_FIRM_SECONDS = 180      # bigger reminder to get back to work
-GENTLE_SHOW_SECONDS = 5       # how long the small note stays up
-TIMER_RESET_SECONDS = 5       # step away this long and your timer starts over
+GENTLE_SHOW_SECONDS = 10      # how long the small note stays up
+TIMER_RESET_SECONDS = 5       # step away (or look away) this long and your timer starts over.
+                              # The camera losing your face for a moment doesn't count
 
 # Multi-user tracking
 LOST_GRACE_SECONDS = 0.5      # keep a person around this long if the detector misses them
@@ -604,7 +607,9 @@ class Face:
         self.measured_angles = (float("inf"),) * 3  # calibrated yaw, pitch, roll
         self.raw_yaw = self.raw_pitch = 0.0   # this frame's measurement, before calibration and smoothing
         self.last_seen = 0.0
-        self.opted_in = False
+        self.opted_in = False   # done the privacy intro
+        self.eligible_since = None     # when they last became eligible (the intro's start)
+        self.ineligible_since = None   # when they last stopped being eligible
         self.opacity = 0.0
         self.session_start = None
         self.last_eligible = 0.0
@@ -817,9 +822,9 @@ def update_face(face: Face, det: np.ndarray, tilt, pose, now: float, frame_size:
         face.tilt = tilt                # carried over from last frame by optical flow
     elif face.tilt is None:            # new face: start from the eye line
         face.tilt = math.degrees(math.atan2(det[7] - det[5], det[6] - det[4]))
-    # A long detection gap starts a new fade for a returning face.
+    # A detection gap: the filter hides (update_opacity decides whether the intro replays)
     if dt > LOST_GRACE_SECONDS:
-        reset_activation(face)
+        face.opacity = 0.0
         face.iris_samples.clear()   # could be someone else now
         face.eye_gap = None
     face.landmarks = landmarks
@@ -899,6 +904,12 @@ def is_eligible(face: Face, frame_w: int, frame_h: int) -> bool:
     return 0 <= nx < frame_w and 0 <= ny < frame_h
 
 
+# --- Privacy intro (3-second wait) ---
+DWELL_SECONDS = 3.0           # in the zone, facing the screen, this long before a filter starts;
+                              # the dashboard shows the privacy note in the middle meanwhile
+DWELL_GRACE_SECONDS = 0.5     # a blink or a missed frame this short doesn't restart the 3 seconds
+
+
 # --- Fade ---
 # Opacity comes from distance: fully visible at FADE_FULL_INCHES or closer, fading to FADE_START at
 # the edge of the zone and gone past it. Leaving the zone or turning away hides it immediately.
@@ -916,14 +927,32 @@ def zone_opacity(distance: float) -> float:
 
 def reset_activation(face: Face) -> None:
     face.opted_in = False
+    face.eligible_since = face.ineligible_since = None
     face.opacity = 0.0
 
 
 def update_opacity(face: Face, eligible: bool, now: float, dt: float) -> None:
+    """Someone new has to stay eligible for DWELL_SECONDS (the privacy intro) before their filter
+    shows. After that it follows their distance, and hides the moment they're not eligible. Coming
+    back within TIMER_RESET_SECONDS doesn't replay the intro."""
     if not eligible:
-        reset_activation(face)
+        face.opacity = 0.0
+        if face.ineligible_since is None:
+            face.ineligible_since = now
+        away = now - face.ineligible_since
+        if away > DWELL_GRACE_SECONDS:
+            face.eligible_since = None     # still waiting: the 3 seconds start over
+        if away > TIMER_RESET_SECONDS:
+            face.opted_in = False          # gone for a while: the next visit gets the intro again
         return
-    face.opted_in = True
+    face.ineligible_since = None
+    if face.eligible_since is None:
+        face.eligible_since = now
+    if not face.opted_in and (not USE_WALK_BY_CHECK or now - face.eligible_since >= DWELL_SECONDS - 1e-9):
+        face.opted_in = True
+    if not face.opted_in:
+        face.opacity = 0.0
+        return
     face.last_eligible = now
     face.opacity = zone_opacity(face.distance)
 
@@ -985,8 +1014,10 @@ def process_faces(frame, faces, filters, active, now, dt, filters_off=None, draw
         seen = face.last_seen == now
         allowed = USE_MULTI_USER or face.id == closest
         update_opacity(face, seen and allowed and not filters_off and is_eligible(face, w, h), now, dt)
-        # Forget people who are gone and fully faded out
-        if now - face.last_seen > LOST_GRACE_SECONDS and face.opacity <= 0:
+        # Forget people who are gone. Someone with a timer running is kept for TIMER_RESET_SECONDS,
+        # so the camera losing their face for a moment doesn't restart their timer.
+        keep = TIMER_RESET_SECONDS if USE_TIMER and face.session_start is not None else LOST_GRACE_SECONDS
+        if now - face.last_seen > keep and face.opacity <= 0:
             for f in filters:
                 if hasattr(f, "forget"):
                     f.forget(face.id)
@@ -1137,6 +1168,14 @@ def main(argv=None):
             draw_notes = dashboard is None
             seen_faces, firm, anyone, gentle = process_faces(
                 frame, faces, filters, active, now, dt, filters_off, draw_notes)
+            # Privacy intro: someone is in the zone but hasn't had their 3 seconds yet, and nobody
+            # is using a filter. The page shows the privacy note in the middle with a countdown.
+            waiting = [f for f in seen_faces if f.eligible_since is not None and not f.opted_in]
+            intro = (max(min(1.0, (now - f.eligible_since) / DWELL_SECONDS) for f in waiting)
+                     if USE_WALK_BY_CHECK and waiting and not anyone else None)
+            # Timer on screen: the longest anyone in front of the screen right now has had a filter
+            timer = max((now - f.session_start for f in seen_faces
+                         if f.session_start is not None and f.opacity > 0), default=None) if USE_TIMER else None
             # Setting the 30-inch distance: average the closest person's eye gap for a moment
             if zone_cal is not None:
                 if seen_faces:
@@ -1179,15 +1218,26 @@ def main(argv=None):
                         "filters": [f.name for f in filters], "active": current, "auto": auto,
                         "switch_in": max(0.0, next_switch - now) if auto and len(filters) > 1 else None,
                         "switch_every": FILTER_SWITCH_SECONDS,
-                        "hint": USE_HINT_TEXT and not anyone and not filters_off,
+                        "hint": USE_HINT_TEXT and not anyone and not filters_off and intro is None,
+                        "active": anyone,
+                        "intro": None if intro is None else round(intro, 3),   # 0 -> 1 over 3 seconds
+                        "dwell": DWELL_SECONDS,
                         "gentle": gentle, "firm": firm, "off": filters_off,
                         "people": len(seen_faces), "debug": debug, "fps": round(fps),
                         "empty_for": 0.0 if seen_faces else round(now - nobody_since, 1),   # seconds nobody's been in view
                         "tracker": "MediaPipe" if "MediaPipe" in tracker else "YuNet",
                         "zone_note": zone_note,
+                        "timer": timer,
                     }
                 actions = list(dashboard.pending())
             else:
+                if intro is not None:
+                    left = math.ceil(DWELL_SECONDS * (1 - intro))
+                    draw_text(frame, "This camera doesn't record. Pictures never leave this computer.", w / 2, h / 2 - 12,
+                              0.6, (255, 255, 255), 2)
+                    draw_text(frame, f"Your filter starts in {left}", w / 2, h / 2 + 18, 0.7, (255, 255, 255), 2)
+                if timer is not None:
+                    draw_text(frame, f"Timer {int(timer) // 60}:{int(timer) % 60:02d}", 60, 20, 0.6, (255, 255, 255), 2)
                 if firm:
                     draw_text(frame, "3 minutes! Time to get back to your work.", w / 2, 40, 0.8, (0, 200, 255), 2)
                 if filters_off:

@@ -100,7 +100,8 @@ FILTER_ALIASES = {"astronaut": "helmet"}
 
 # --- Feature toggles (True = on, False = off) ---
 USE_OPT_IN_ZONE = True    # only people at or closer than ZONE_ENTER_INCHES get a filter
-USE_WALK_BY_CHECK = False # optional privacy intro; disabled to preserve immediate activation
+USE_WALK_BY_CHECK = True  # 3-second privacy intro: stay in the zone, facing the screen, for DWELL_SECONDS
+                          # before your filter starts. People hurrying past never get one (issue #7)
 USE_ANGLE_LIMIT = True    # stop drawing past MAX_ANGLE, independently for each person
 USE_FADE_IN = True        # fade by distance between FADE_FULL_INCHES and ZONE_ENTER_INCHES
                           # (off = fully visible anywhere in the zone)

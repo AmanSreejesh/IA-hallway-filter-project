@@ -81,6 +81,11 @@ class AcceptanceTests(unittest.TestCase):
         self.forward = patch.dict(system.FORWARD, yaw=0.0, pitch=0.0)
         self.forward.start()
         self.addCleanup(self.forward.stop)
+        # Most tests check what a filter does once it's on, so they skip the 3-second privacy intro.
+        # The DwellTests below check the intro itself.
+        self.dwell = patch.object(system, "DWELL_SECONDS", 0.0)
+        self.dwell.start()
+        self.addCleanup(self.dwell.stop)
 
     def step(self, faces, effect, now, detections=(), *, off=False):
         next_id = [max(faces, default=-1)+1]
@@ -122,7 +127,6 @@ class AcceptanceTests(unittest.TestCase):
                         self.assertFalse(np.all(frame == 140), "actual renderer must draw")
 
     def test_eligible_visits_activate_without_waiting(self):
-        self.assertFalse(system.USE_WALK_BY_CHECK)
         for actual in self.filters:
             with self.subTest(filter=actual.name):
                 faces, effect = {}, RecordingFilter(actual)
@@ -537,7 +541,7 @@ if __name__ == "__main__":
 
 
 class DwellTests(unittest.TestCase):
-    """The optional privacy intro, explicitly enabled here; normal activation has no wait."""
+    """Issue #7 and the privacy intro: 3 seconds in the zone, facing the screen, before a filter."""
 
     @classmethod
     def setUpClass(cls):

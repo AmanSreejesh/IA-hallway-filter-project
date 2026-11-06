@@ -3,13 +3,13 @@ Main hallway filter system.
 Combines each team member's filter and applies the shared features to all of them.
 
 Run from the repo root:
-    python common/main.py              # every filter, taking turns
+    python common/main.py              # every filter (pick one with the wheel)
     python common/main.py emoji        # only the filters you name (for testing your own)
     python common/main.py sharingan    # Aman's procedural iris effect
     python common/main.py astronaut clown_nose
 
 Face tracking: each filter says which face tracker it wants, and this file uses whichever one
-the filter on screen asks for (switching automatically when the filters take turns):
+the filter on screen asks for (switching automatically when you pick another filter):
   - "mediapipe": follows 478 points per face and measures the head's 3D angle. Best for filters
     that turn and tilt with your head (the 3D emoji uses it). Needs: pip install mediapipe
   - "yunet": finds 5 points per face. Lighter, and doesn't need anything extra.
@@ -24,8 +24,12 @@ Set it up once with a tape measure: stand with your eyes exactly 30 inches from 
 look at the screen, and press z (or "Set 30-inch distance" in the staff controls).
 
 Dashboard: the camera fills a full-screen web page (common/dashboard/). A small filter wheel sits
-at the bottom: tap it to open it, spin it or tap a slice to pick a filter. A picked filter stays
-until nobody has been in view for FILTER_SWITCH_SECONDS, then the filters take turns again.
+at the bottom: tap it to open it, spin it or tap a slice to pick a filter. The filter only
+changes when someone picks one (USE_ENGAGEMENT turns on automatic switching, off by default).
+
+Timer (issue #8): a 1-minute timer starts when someone's filter starts. When it's up, a small
+note gently says 1 minute has passed. At 3 minutes a more prominent banner reminds them to get
+back to what they were doing. Neither stops or covers the filter.
 On the Pi it opens Chromium in kiosk mode by itself; anywhere else it opens a browser tab (tap it
 once to go full screen). The page is only reachable from this computer. Staff controls
 (calibrate, debug view) open by holding the top-left corner of the screen for 2 seconds.
@@ -103,7 +107,8 @@ USE_FADE_IN = True        # fade by distance between FADE_FULL_INCHES and ZONE_E
                           # (off = fully visible anywhere in the zone)
 USE_TIMER = True          # 1 minute note and 3 minute reminder
 USE_MULTI_USER = True     # everyone in view gets a filter (off = only the closest person)
-USE_ENGAGEMENT = True     # rotate between filters every FILTER_SWITCH_SECONDS ('n' still works when off)
+USE_ENGAGEMENT = False    # switch filters by itself every FILTER_SWITCH_SECONDS. Off: the filter only
+                          # changes when someone picks one on the wheel (or presses n)
 USE_SCHEDULE = True       # filters are off from FILTERS_OFF_AT to FILTERS_ON_AT (local time). Set to False
                           # for after-school events like showcases
 USE_HINT_TEXT = True      # "Step up close..." message when nobody is using a filter
@@ -144,8 +149,8 @@ MOVING_RESPONSE = 5.0     # higher = catches up faster when you move (try 2 to 1
 
 
 # Timer
-TIMER_GENTLE_SECONDS = 60     # small note that a minute has passed
-TIMER_FIRM_SECONDS = 180      # bigger reminder to get back to work
+TIMER_GENTLE_SECONDS = 60     # the 1-minute timer: when it runs out, a small note says a minute has passed
+TIMER_FIRM_SECONDS = 180      # prominent reminder to get back to what they were doing
 GENTLE_SHOW_SECONDS = 10      # how long the small note stays up
 TIMER_RESET_SECONDS = 5       # step away (or look away) this long and your timer starts over.
                               # The camera losing your face for a moment doesn't count
@@ -1173,9 +1178,6 @@ def main(argv=None):
             waiting = [f for f in seen_faces if f.eligible_since is not None and not f.opted_in]
             intro = (max(min(1.0, (now - f.eligible_since) / DWELL_SECONDS) for f in waiting)
                      if USE_WALK_BY_CHECK and waiting and not anyone else None)
-            # Timer on screen: the longest anyone in front of the screen right now has had a filter
-            timer = max((now - f.session_start for f in seen_faces
-                         if f.session_start is not None and f.opacity > 0), default=None) if USE_TIMER else None
             # Setting the 30-inch distance: average the closest person's eye gap for a moment
             if zone_cal is not None:
                 if seen_faces:
@@ -1196,7 +1198,7 @@ def main(argv=None):
                         zone_note = "Couldn't see a face. Stand 30 in away, look at the screen, try again"
                         print(zone_note)
                     zone_cal = None
-            # Someone picked a filter on the screen: it stays until everyone has left for a while,
+            # With USE_ENGAGEMENT on, a picked filter stays until everyone has left for a while,
             # then the filters go back to taking turns for the next people.
             if seen_faces:
                 nobody_since = now
@@ -1219,7 +1221,7 @@ def main(argv=None):
                         "switch_in": max(0.0, next_switch - now) if auto and len(filters) > 1 else None,
                         "switch_every": FILTER_SWITCH_SECONDS,
                         "hint": USE_HINT_TEXT and not anyone and not filters_off and intro is None,
-                        "active": anyone,
+                        "in_use": anyone,   # someone has a filter on right now
                         "intro": None if intro is None else round(intro, 3),   # 0 -> 1 over 3 seconds
                         "dwell": DWELL_SECONDS,
                         "gentle": gentle, "firm": firm, "off": filters_off,
@@ -1227,7 +1229,6 @@ def main(argv=None):
                         "empty_for": 0.0 if seen_faces else round(now - nobody_since, 1),   # seconds nobody's been in view
                         "tracker": "MediaPipe" if "MediaPipe" in tracker else "YuNet",
                         "zone_note": zone_note,
-                        "timer": timer,
                     }
                 actions = list(dashboard.pending())
             else:
@@ -1236,10 +1237,8 @@ def main(argv=None):
                     draw_text(frame, "This camera doesn't record. Pictures never leave this computer.", w / 2, h / 2 - 12,
                               0.6, (255, 255, 255), 2)
                     draw_text(frame, f"Your filter starts in {left}", w / 2, h / 2 + 18, 0.7, (255, 255, 255), 2)
-                if timer is not None:
-                    draw_text(frame, f"Timer {int(timer) // 60}:{int(timer) % 60:02d}", 60, 20, 0.6, (255, 255, 255), 2)
                 if firm:
-                    draw_text(frame, "3 minutes! Time to get back to your work.", w / 2, 40, 0.8, (0, 200, 255), 2)
+                    draw_text(frame, "3 minutes are up! Time to get back to what you were doing.", w / 2, 40, 0.7, (0, 200, 255), 2)
                 if filters_off:
                     draw_text(frame, "Filters are off right now. They're back at 7:30 a.m.", w / 2, h - 16, 0.5, (200, 200, 200))
                 elif USE_HINT_TEXT and not anyone:

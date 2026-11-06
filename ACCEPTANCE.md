@@ -17,9 +17,10 @@ frame under half a second doesn't restart it, and someone who steps away and com
 back within 5 seconds doesn't see it again. People hurrying past in under 3 seconds
 never get an effect (#7).
 
-Timer (#8): once someone's effect starts, a timer counts up in the top-left corner.
-At 1 minute a small note says so (for 10 seconds); at 3 minutes a prominent card
-reminds them to get back to class. The camera losing their face for a moment doesn't
+Timer (#8): a 1-minute timer starts when someone's effect starts. When it's up, a
+small note gently says 1 minute has passed (for 10 seconds); at 3 minutes a more
+prominent banner reminds them to get back to what they were doing. Neither stops or
+covers the effect. The camera losing their face for a moment doesn't
 restart it; stepping away or looking away for more than 5 seconds does.
 
 | Scenario, repeated for each filter | Expected behavior | Required physical result |
@@ -35,7 +36,7 @@ restart it; stepping away or looking away for more than 5 seconds does.
 | Walk in from 30 inches at a 60-degree turn | Opacity 0.1 at 30 inches, increasing as they come closer, full at 25 inches | 5/5 |
 | Hurry through view in less than 3 seconds, including inside the zone | No effect at any point, even while facing forward | At least 9/10 |
 | Sit in the zone with an effect for 1 minute | Note that 1 minute has passed | 5/5 |
-| Stay with an effect for 3 minutes | Prominent reminder to get back to class | 100% |
+| Stay with an effect for 3 minutes | Prominent reminder to get back to what they were doing | 100% |
 | Enter view at or after 4:15 p.m. local time; also test someone already active at cutoff | No effect from the cutoff until 7:30 a.m., including during a fade; effects work again from 7:30 a.m. | 100% (record trial count) |
 
 ## Automated checks

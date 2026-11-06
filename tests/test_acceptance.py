@@ -545,3 +545,19 @@ class DwellTests(unittest.TestCase):
         frames += [(16 + t, detection()) for t in np.arange(0.1, 1.01, 0.1)]     # comes back
         _, drawn = self.visit(frames)
         self.assertIn(round(16.1, 6), [round(t, 6) for t in drawn])   # straight back on, no 3 s wait
+
+
+class DashboardStateTests(unittest.TestCase):
+    def test_dashboard_state_has_no_duplicate_keys(self):
+        # A repeated key silently replaces the first one; "active" once got overwritten this way,
+        # which sent the wheel to the wrong filter.
+        import ast
+        with open(system.__file__) as source:
+            tree = ast.parse(source.read())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Dict):
+                keys = [k.value for k in node.keys if isinstance(k, ast.Constant)]
+                if "filters" in keys and "active" in keys:
+                    self.assertEqual(len(keys), len(set(keys)), keys)
+                    return
+        self.fail("dashboard state not found")

@@ -140,8 +140,14 @@ IRIS_MAX_TURN = 25        # only measure when the head is turned left/right less
 IRIS_MAX_SPEED = 2.0      # ...isn't moving faster than this (face widths per second, blur)...
 IRIS_MIN_PX = 5           # ...and the iris is at least this many pixels wide
 
-MAX_ANGLE = 60            # filters show up to and including 60 degrees on every axis (turn, nod,
-                          # tilt) and stop past that, e.g. a passerby in profile (90 degrees)
+MAX_ANGLE = 60            # nod and tilt: filters show up to and including this, and stop past it
+MAX_TURN = 90             # turning left/right: filters show up to and including this, and stop past it
+TIME_FADE_FROM = 45       # someone who ENTERS turned past this (up to MAX_TURN) gets their filter at
+                          # FADE_START, rising over FADE_IN_SECONDS (issue #5), until they turn to face
+                          # within this. Everyone else, and anyone who turns later, fades by distance only
+FADE_IN_SECONDS = 4.0     # how long that rise takes (never above what their distance allows). Slow
+                          # enough to see: a 1-second rise looked like it came in at full
+EYE_MOUTH_RATIO = 1.1     # eyes-to-mouth height / eye gap, for distance when the head is turned too far
 
 # Smoothing for motion diagnostics; drawing uses current-frame geometry to avoid lag.
 STILL_SMOOTHING = 1.0     # lower = steadier when still, but more lag (try 0.5 to 2)
@@ -615,6 +621,8 @@ class Face:
         self.opted_in = False   # done the privacy intro
         self.eligible_since = None     # when they last became eligible (the intro's start)
         self.ineligible_since = None   # when they last stopped being eligible
+        self.fade_start = None  # when their filter first appeared this visit
+        self.entered_turned = False    # arrived turned past TIME_FADE_FROM (gets the time fade-in)
         self.opacity = 0.0
         self.session_start = None
         self.last_eligible = 0.0
@@ -765,6 +773,15 @@ def estimate_distance(p: np.ndarray, raw_yaw: float, frame_size: tuple, gap_inch
     return focal * gap / frontal_eye_gap(p, raw_yaw, frame_size) * off_axis(p, frame_size)
 
 
+def profile_distance(p: np.ndarray, frame_size: tuple, gap_inches: float = None) -> float:
+    """Distance from the eyes-to-mouth height, for a head turned too far for the eye gap.
+    Turning left/right doesn't change that height (about EYE_MOUTH_RATIO eye gaps)."""
+    focal = DISTANCE_FOCAL or FOCAL_PX
+    height = EYE_MOUTH_RATIO * (gap_inches or EYE_GAP_INCHES)
+    drop = float(np.linalg.norm((p[5] + p[6]) / 2 - (p[2] + p[3]) / 2))
+    return focal * height / max(drop, 1.0) * off_axis(p, frame_size)
+
+
 def calibration_sample(face, frame_size: tuple, inches: float = None) -> float:
     """f * G for someone standing exactly `inches` away (estimate_distance run backwards).
     Divide by their eye gap to get the camera's focal length."""
@@ -863,7 +880,13 @@ def update_face(face: Face, det: np.ndarray, tilt, pose, now: float, frame_size:
         face.iris_samples.append(sample)
     if len(face.iris_samples) >= IRIS_MIN_SAMPLES:
         face.eye_gap = weighted_median(face.iris_samples)
-    face.distance = estimate_distance(face.points, face.raw_yaw, frame_size, face.eye_gap)
+    if math.isfinite(face.raw_yaw) and abs(face.raw_yaw) > MAX_ANGLE:
+        # Turned too far for the eye gap. Turning your head doesn't move you, so keep the distance
+        # measured a moment ago; someone who arrived already turned is measured eyes-to-mouth.
+        if not (0 < dt <= LOST_GRACE_SECONDS and math.isfinite(face.distance) and face.distance < 999):
+            face.distance = profile_distance(face.points, frame_size, face.eye_gap)
+    else:
+        face.distance = estimate_distance(face.points, face.raw_yaw, frame_size, face.eye_gap)
     face.last_seen = now
 
 
@@ -888,9 +911,16 @@ def track(faces: dict, detections: list, now: float, next_id: list, frame_size: 
 
 
 def within_angle_limit(face: Face) -> bool:
-    """A current-frame boundary, shared by every filter and detector. Exactly MAX_ANGLE still counts."""
-    return bool(np.isfinite(face.measured_angles).all() and
-                max(abs(a) for a in face.measured_angles) <= MAX_ANGLE + 1e-5)
+    """A current-frame boundary, shared by every filter and detector. Turning counts up to and
+    including MAX_TURN, nodding and tilting up to and including MAX_ANGLE."""
+    yaw, pitch, roll = face.measured_angles
+    return bool(np.isfinite(face.measured_angles).all() and abs(yaw) <= MAX_TURN + 1e-5 and
+                max(abs(pitch), abs(roll)) <= MAX_ANGLE + 1e-5)
+
+
+def wide_turn(face: Face) -> bool:
+    """Turned past TIME_FADE_FROM (but within MAX_TURN): the filter fades in over time (issue #5)."""
+    return math.isfinite(face.measured_angles[0]) and abs(face.measured_angles[0]) > TIME_FADE_FROM + 1e-5
 
 
 # --- Opt-in zone ---
@@ -932,7 +962,8 @@ def zone_opacity(distance: float) -> float:
 
 def reset_activation(face: Face) -> None:
     face.opted_in = False
-    face.eligible_since = face.ineligible_since = None
+    face.eligible_since = face.ineligible_since = face.fade_start = None
+    face.entered_turned = False
     face.opacity = 0.0
 
 
@@ -949,17 +980,32 @@ def update_opacity(face: Face, eligible: bool, now: float, dt: float) -> None:
             face.eligible_since = None     # still waiting: the 3 seconds start over
         if away > TIMER_RESET_SECONDS:
             face.opted_in = False          # gone for a while: the next visit gets the intro again
+            face.fade_start = None
         return
     face.ineligible_since = None
     if face.eligible_since is None:
         face.eligible_since = now
+        if not face.opted_in:              # a new visit: did they arrive turned to the side?
+            face.entered_turned = wide_turn(face)
+            face.fade_start = None
     if not face.opted_in and (not USE_WALK_BY_CHECK or now - face.eligible_since >= DWELL_SECONDS - 1e-9):
         face.opted_in = True
     if not face.opted_in:
         face.opacity = 0.0
         return
     face.last_eligible = now
+    if face.fade_start is None:
+        face.fade_start = now   # their filter appears for the first time this visit
     face.opacity = zone_opacity(face.distance)
+    if face.entered_turned and not wide_turn(face):
+        face.entered_turned = False   # they've faced the screen (45 degrees or less): distance from now on
+    if face.entered_turned:
+        # Issue #5: someone who walked up turned to the side may not want a filter yet, so it
+        # appears at 0.1 and increases with time in detection, until they face the screen (45
+        # degrees or less), which switches them to the distance fade like everyone else. Only for
+        # people who ENTER turned; turning later never fades it.
+        ramp = FADE_START + (1 - FADE_START) * min(1.0, (now - face.fade_start) / FADE_IN_SECONDS)
+        face.opacity = min(face.opacity, ramp)
 
 
 # --- Timer ---

@@ -138,18 +138,76 @@ class AcceptanceTests(unittest.TestCase):
                     self.assertEqual(len(effect.calls), round(elapsed*10)+1)
                 self.assertAlmostEqual(effect.calls[0][1], 1.0)   # 24 in: inside 25, fully visible
 
-    def test_sixty_degree_turn_starts_at_point_one_and_increases_five_trials(self):
-        # Fade is by distance: 0.1 at the 30-inch edge, rising as they come closer, full at 25.
+    def test_45_degree_turn_starts_at_point_one_and_increases_five_trials(self):
+        # Up to 45 degrees the fade is by distance: 0.1 at the 30-inch edge, rising as they come
+        # closer, full at 25.
         for actual in self.filters:
             for trial in range(5):
                 with self.subTest(filter=actual.name, trial=trial):
                     faces, effect = {}, RecordingFilter(actual)
                     for now, inches in ((10.0, 30), (10.1, 28.5), (10.2, 27), (10.3, 25)):
-                        self.step(faces, effect, now, [detection(inches, yaw=(-1)**trial*60)])
+                        self.step(faces, effect, now, [detection(inches, yaw=(-1)**trial*45)])
                     opacity = [value for _, value in effect.calls]
                     self.assertAlmostEqual(opacity[0], 0.1, places=4)
                     self.assertTrue(all(a < b for a, b in zip(opacity, opacity[1:])))
                     self.assertAlmostEqual(opacity[-1], 1, places=4)
+
+    def test_turned_past_45_appears_at_point_one_and_rises_with_time_five_trials(self):
+        # Issue #5: turned past 45 degrees (up to and including 90), the filter only appears at 0.1
+        # and increases with time in detection, reaching full after FADE_IN_SECONDS.
+        for yaw in (46, 60, -60, 75, 90, -90):
+            for trial in range(5):
+                with self.subTest(yaw=yaw, trial=trial):
+                    faces, effect = {}, RecordingFilter(self.filters[trial % len(self.filters)])
+                    ramp = system.FADE_IN_SECONDS
+                    for k in (0, 0.25, 0.5, 0.75, 1.0, 1.5):
+                        row, _, _, mesh = detection(24)
+                        self.step(faces, effect, 10 + k * ramp, [(row, 0, (yaw, 0), mesh)])
+                    opacity = [value for _, value in effect.calls]
+                    self.assertEqual(len(opacity), 6)
+                    self.assertAlmostEqual(opacity[0], 0.1, places=6)
+                    self.assertAlmostEqual(opacity[1], 0.1 + 0.9 * 0.25, places=6)
+                    self.assertTrue(all(a < b for a, b in zip(opacity[:5], opacity[1:5])))
+                    self.assertAlmostEqual(opacity[4], 1, places=6)
+
+    def test_up_to_45_degrees_uses_the_distance_fade_only(self):
+        for yaw in (0, 30, 45, -45):
+            with self.subTest(yaw=yaw):
+                faces, effect = {}, RecordingFilter(self.filters[0])
+                self.step(faces, effect, 10, [detection(24, yaw=yaw)])
+                self.assertAlmostEqual(effect.calls[0][1], 1)   # 24 in: full straight away
+
+    def test_turning_past_45_keeps_a_filter_that_is_already_up(self):
+        faces, effect = {}, RecordingFilter(self.filters[0])
+        for now in (10.0, 10.5, 11.0, 11.5):
+            self.step(faces, effect, now, [detection(24)])
+        row, _, _, mesh = detection(24)
+        self.step(faces, effect, 11.6, [(row, 0, (80, 0), mesh)])
+        self.assertAlmostEqual(effect.calls[-1][1], 1)
+        self.assertAlmostEqual(faces[0].distance, 24, places=2)   # distance kept while turned
+
+    def turned(self, yaw, inches=24):
+        row, _, _, mesh = detection(inches)
+        return (row, 0, (yaw, 0), mesh)
+
+    def test_entering_turned_then_facing_the_screen_switches_to_distance(self):
+        faces, effect = {}, RecordingFilter(self.filters[0])
+        self.step(faces, effect, 10.0, [self.turned(70)])
+        self.step(faces, effect, 10.4, [self.turned(70)])
+        self.assertAlmostEqual(effect.calls[-1][1], 0.1 + 0.9 * 0.4 / system.FADE_IN_SECONDS, places=6)
+        self.step(faces, effect, 10.45, [self.turned(20)])
+        self.assertAlmostEqual(effect.calls[-1][1], 1)    # faced the screen: distance (24 in = full)
+        self.step(faces, effect, 10.5, [self.turned(70)])
+        self.assertAlmostEqual(effect.calls[-1][1], 1)    # turning away again stays distance-based
+
+    def test_entering_facing_the_screen_never_gets_the_time_fade(self):
+        faces, effect = {}, RecordingFilter(self.filters[0])
+        for now in (10.0, 10.5):
+            self.step(faces, effect, now, [detection(24)])
+        self.step(faces, effect, 10.6, [self.turned(95)])   # past 90: filter hidden for a moment
+        self.assertEqual(faces[0].opacity, 0)
+        self.step(faces, effect, 10.7, [self.turned(70)])   # back within 90, still turned
+        self.assertAlmostEqual(effect.calls[-1][1], 1)      # straight back at full, no fade-in
 
     def test_fade_is_linear_by_distance_between_25_and_30_inches(self):
         for inches, expected in [(6, 1), (24.9, 1), (25, 1), (26, 0.82), (27.5, 0.55), (29, 0.28),
@@ -247,7 +305,7 @@ class AcceptanceTests(unittest.TestCase):
 
     def test_in_zone_profile_and_invalid_pose_never_draw_over_time(self):
         for actual in self.filters:
-            for pose in [(90, 0, 0), (0, 90, 0), (0, 0, 90), (float("nan"), 0, 0), (60.01, 0, 0)]:
+            for pose in [(90.01, 0, 0), (0, 90, 0), (0, 0, 90), (float("nan"), 0, 0), (0, 60.01, 0), (0, 0, 60.01)]:
                 with self.subTest(filter=actual.name, pose=pose):
                     faces, effect = {}, RecordingFilter(actual)
                     yaw, pitch, roll = pose
@@ -263,7 +321,7 @@ class AcceptanceTests(unittest.TestCase):
             for now in np.arange(10, 13.5, 0.1):
                 self.step(faces, effect, float(now), [detection(30)])
             self.assertTrue(effect.calls)
-            for now, det in [(13.5, detection(30.01)), (13.6, detection(yaw=90))]:
+            for now, det in [(13.5, detection(30.01)), (13.6, detection(yaw=90.01))]:
                 calls = len(effect.calls)
                 self.step(faces, effect, now, [det])
                 self.assertEqual(len(effect.calls), calls)

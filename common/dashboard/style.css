@@ -230,6 +230,198 @@ svg.layer, .layer svg { overflow: visible; display: block; width: 100%; height: 
 .btn:active { transform: scale(0.96); }
 .btn-quiet { background: #e5e7eb; color: var(--ink); }
 
+/* ---- Resting screen: the four filters take turns in a big frame; tap anywhere to start ---- */
+@font-face { font-family: "Schibsted Grotesk"; src: url(fonts/schibsted-grotesk-latin-400-normal.woff2) format("woff2"); font-weight: 400; font-display: swap; }
+@font-face { font-family: "Schibsted Grotesk"; src: url(fonts/schibsted-grotesk-latin-700-normal.woff2) format("woff2"); font-weight: 700; font-display: swap; }
+@font-face { font-family: "Schibsted Grotesk"; src: url(fonts/schibsted-grotesk-latin-800-normal.woff2) format("woff2"); font-weight: 800; font-display: swap; }
+
+body.resting .wheel, body.resting #name { opacity: 0 !important; pointer-events: none; }
+.wheel, #name { transition: opacity 400ms ease; }
+
+.rest {
+  --paper: #F3EFE6;
+  --rink: #1D1B18;
+  --muted: #6B665C;
+  --tint: #E4DCCB;
+  --turn: 5s;            /* how long each filter stays in the big frame (app.js reads this) */
+  --ease: cubic-bezier(0.65, 0, 0.35, 1);
+  position: fixed;
+  inset: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1fr);
+  gap: 5vw;
+  padding: 7vh 5vw 6vh;
+  background: var(--paper);
+  color: var(--rink);
+  font-family: "Schibsted Grotesk", system-ui, sans-serif;
+  overflow: hidden;
+  cursor: pointer;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 450ms ease, transform 450ms ease, visibility 0s linear 450ms;
+}
+.rest.on { opacity: 1; visibility: visible; transition: opacity 600ms ease, transform 600ms ease; }
+.rest:not(.on) * { animation-play-state: paused !important; }
+.rest.leaving { opacity: 0; transform: scale(1.02); pointer-events: none; }
+
+/* Paper grain over everything, so it reads like print rather than a slide */
+.rest::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.55;
+  mix-blend-mode: multiply;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='240' height='240'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 .35  0 0 0 0 .3  0 0 0 0 .24  0 0 0 .5 0'/></filter><rect width='240' height='240' filter='url(%23n)'/></svg>");
+}
+
+/* A big soft shape in the current filter's colour that slowly changes shape */
+.rest-blob {
+  position: absolute;
+  right: -12vw;
+  top: -18vh;
+  width: 74vw;
+  height: 136vh;
+  background: var(--tint);
+  border-radius: 46% 54% 42% 58% / 52% 38% 62% 48%;
+  transition: background-color 1200ms var(--ease);
+  animation: morph 22s ease-in-out infinite alternate;
+  will-change: transform;
+}
+@keyframes morph {
+  50% { border-radius: 58% 42% 55% 45% / 40% 58% 42% 60%; transform: rotate(6deg) translate(-2vw, 2vh); }
+  100% { border-radius: 40% 60% 48% 52% / 58% 46% 54% 42%; transform: rotate(-4deg) translate(1vw, -1vh); }
+}
+
+.rest-left, .rest-right { position: relative; z-index: 1; min-height: 0; }
+
+/* Left: like a smart display. The time up top, the question, and when filters switch off */
+.rest-left { display: flex; flex-direction: column; justify-content: space-between; }
+.rest-time { font-size: clamp(40px, 6.4vh, 76px); font-weight: 700; letter-spacing: -0.03em; line-height: 1; }
+.rest-date { margin-top: 0.8vh; font-size: clamp(17px, 2.3vh, 26px); color: var(--muted); }
+.rest-title {
+  font-size: clamp(52px, 10vh, 124px);
+  font-weight: 800;
+  line-height: 0.96;
+  letter-spacing: -0.035em;
+  max-width: 8ch;
+}
+.rest-tap {
+  margin-top: 4.5vh;
+  display: flex;
+  align-items: center;
+  gap: 0.75em;
+  font-size: clamp(24px, 3.6vh, 42px);
+  font-weight: 500;
+  letter-spacing: -0.01em;
+}
+/* a fingertip-sized ring that keeps "tapping" */
+.tap-mark { position: relative; width: 1.25em; height: 1.25em; flex: none; display: grid; place-items: center; }
+.tap-mark::before, .tap-mark > span { content: ""; position: absolute; inset: 0; border-radius: 50%; }
+.tap-mark::before { border: 2.5px solid var(--rink); animation: tap 2.2s var(--ease) infinite; }
+.tap-mark > span { inset: 30%; background: var(--rink); animation: press 2.2s var(--ease) infinite; }
+@keyframes tap { 0%, 20% { transform: scale(0.6); opacity: 0; } 35% { opacity: 1; } 100% { transform: scale(1.5); opacity: 0; } }
+@keyframes press { 0%, 100% { transform: scale(1); } 20% { transform: scale(0.75); } 40% { transform: scale(1); } }
+.rest.noticed .tap-mark::before, .rest.noticed .tap-mark > span { animation-duration: 1.3s; }
+.rest-status { display: grid; gap: 1vh; }
+.rest-until { font-size: clamp(17px, 2.3vh, 26px); font-weight: 500; }
+.rest-until:empty { display: none; }
+.rest-privacy { font-size: clamp(14px, 1.8vh, 20px); line-height: 1.35; color: var(--muted); max-width: 40ch; }
+
+/* Right: the big frame with its caption, and all four filters down the side */
+.rest-right {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: clamp(20px, 2.6vw, 52px);
+  align-items: center;
+}
+.rest-feature { display: grid; gap: 2.4vh; justify-items: start; }
+.rest-stage {
+  position: relative;
+  height: min(68vh, calc((100vw * 0.55 - 15vh) * 1.1));
+  aspect-ratio: 200 / 220;
+  border-radius: 28px;
+  overflow: hidden;
+  background: var(--rink);
+}
+.slide {
+  position: absolute;
+  inset: 0;
+  background: var(--c);
+  visibility: hidden;
+  clip-path: circle(0% at 50% 46%);
+}
+.slide svg { display: block; width: 100%; height: 100%; }
+.slide.under { visibility: visible; z-index: 1; clip-path: none; }
+.slide.under svg { transform: scale(0.94); transition: transform 1000ms var(--ease); }
+.slide.now {
+  visibility: visible;
+  z-index: 2;
+  clip-path: circle(80% at 50% 46%);
+  transition: clip-path 1000ms var(--ease);
+}
+.slide.now svg { animation: settle 1300ms cubic-bezier(0.2, 0.7, 0.2, 1); }
+@keyframes settle { from { transform: scale(1.1) translateY(3%); } }
+.slide-line {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 100%;
+  width: 4px;
+  margin-left: -2px;
+  background: var(--paper);
+  opacity: 0;
+  transition: opacity 300ms ease;
+}
+
+.rest-caption { transition: opacity 260ms ease, transform 420ms var(--ease); }
+.rest-caption.swap { opacity: 0; transform: translateY(10px); }
+.rest-name { font-size: clamp(26px, 3.8vh, 44px); font-weight: 700; letter-spacing: -0.015em; }
+.rest-what { margin-top: 0.4vh; font-size: clamp(17px, 2.3vh, 26px); line-height: 1.3; color: var(--muted); max-width: 32ch; min-height: 2.6em; }
+
+.rest-rail { display: grid; gap: 2vh; align-content: center; }
+.thumb { display: grid; gap: 0.9vh; width: clamp(96px, 13vh, 150px); }
+.thumb-frame {
+  position: relative;
+  aspect-ratio: 200 / 220;
+  border-radius: 16px;
+  overflow: hidden;
+  background: var(--c);
+  outline: 3px solid transparent;
+  outline-offset: 4px;
+  transition: outline-color 300ms ease, transform 300ms var(--ease);
+}
+.thumb-frame svg { display: block; width: 100%; height: 100%; }
+.thumb.now .thumb-frame { outline-color: var(--rink); }
+.thumb:active .thumb-frame { transform: scale(0.96); }
+.thumb-name { font-size: clamp(15px, 2vh, 22px); font-weight: 700; letter-spacing: -0.01em; }
+/* how long until the next filter: a thin line under the current one */
+.thumb-bar { height: 3px; margin-top: 2px; background: rgba(29, 27, 24, 0.12); border-radius: 2px; overflow: hidden; }
+.thumb-bar::after { content: ""; display: block; height: 100%; background: var(--rink); transform-origin: left; transform: scaleX(0); }
+.thumb.now .thumb-bar::after { animation: fill var(--turn) linear forwards; }
+@keyframes fill { to { transform: scaleX(1); } }
+
+/* Little movements inside the big picture only */
+.blink, .person, .emo, .lens, .boing, .glint { transform-box: fill-box; }
+.rest-stage .blink { transform-origin: center; animation: blink 4.6s infinite; }
+@keyframes blink { 0%, 95%, 100% { transform: scaleY(1); } 97.5% { transform: scaleY(0.1); } }
+.rest-stage .person { transform-origin: 50% 100%; animation: breathe 4.5s ease-in-out infinite; }
+@keyframes breathe { 50% { transform: translateY(-1.2%); } }
+.rest-stage .emo { transform-origin: 50% 100%; animation: sway 3.6s ease-in-out infinite; }
+@keyframes sway { 0%, 100% { transform: rotate(-7deg); } 50% { transform: rotate(7deg); } }
+.expr { opacity: 0; transition: opacity 250ms ease; }
+.expr.on { opacity: 1; }
+.rest-stage .spin { transform-box: view-box; transform-origin: 0 0; animation: spin 1.8s linear infinite; }   /* turns around the iris centre */
+.rest-stage .glint { animation: glint 3.4s ease-in-out infinite; }
+@keyframes glint { 0%, 30% { transform: skewX(-20deg) translateX(-60px); } 70%, 100% { transform: skewX(-20deg) translateX(200px); } }
+.rest-stage .beacon { animation: beacon 1.4s ease-in-out infinite; }
+.rest-stage .beacon.b2 { animation-delay: -0.7s; }
+@keyframes beacon { 50% { opacity: 0.3; } }
+.rest-stage .boing { transform-origin: center; animation: boing 2.4s ease-in-out infinite; }
+@keyframes boing { 0%, 70%, 100% { transform: scale(1); } 80% { transform: scale(1.18, 0.88); } 90% { transform: scale(0.95, 1.06); } }
+
 @media (prefers-reduced-motion: reduce) {
   .drift-slow, .drift-back { animation: none; }
+  .rest *, .rest *::before, .rest *::after { animation: none !important; }
+  .slide.now { transition: none; }
 }

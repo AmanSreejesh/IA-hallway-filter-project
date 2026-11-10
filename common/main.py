@@ -27,6 +27,11 @@ Dashboard: the camera fills a full-screen web page (common/dashboard/). A small 
 at the bottom: tap it to open it, spin it or tap a slice to pick a filter. The filter only
 changes when someone picks one (USE_ENGAGEMENT turns on automatic switching, off by default).
 
+Resting screen: while nobody's using it, the page shows the four filters on illustrated faces and
+asks people walking by to tap the screen. Nothing happens until someone taps (tapping one of the
+filters starts with that one). Then the privacy intro and filters work as usual, and once nobody
+has been in view for RESTING_AFTER_SECONDS (5) it goes back to the resting screen.
+
 Timer (issue #8): a 1-minute timer starts when someone's filter starts. When it's up, a small
 note gently says 1 minute has passed. At 3 minutes a more prominent banner reminds them to get
 back to what they were doing. Neither stops or covers the filter.
@@ -112,6 +117,9 @@ USE_ENGAGEMENT = False    # switch filters by itself every FILTER_SWITCH_SECONDS
 USE_SCHEDULE = True       # filters are off from FILTERS_OFF_AT to FILTERS_ON_AT (local time). Set to False
                           # for after-school events like showcases
 USE_HINT_TEXT = True      # "Step up close..." message when nobody is using a filter
+USE_RESTING_SCREEN = True # the resting screen: shows the four filters and asks people to tap the screen.
+                          # Nobody gets a filter (or the privacy intro) until someone taps. It comes back
+                          # once nobody has been in view for RESTING_AFTER_SECONDS
 
 # --- Settings (keep in sync with constraints.md) ---
 TRACKER = None            # None = whatever each filter asks for, or "mediapipe" / "yunet" to force one
@@ -167,10 +175,24 @@ LOST_GRACE_SECONDS = 0.5      # keep a person around this long if the detector m
 # Engagement
 FILTER_SWITCH_SECONDS = 30    # rotate to the next filter this often
 
+# Resting screen
+RESTING_AFTER_SECONDS = 5     # everyone has left (nobody in view) this long: back to the resting screen
+
 # Schedule: filters turn off after dismissal so nobody heading to the buses gets stopped,
 # and come back on in the morning
 FILTERS_OFF_AT = dtime(16, 15)   # 4:15 pm
 FILTERS_ON_AT = dtime(7, 30)     # 7:30 am
+
+
+def back_to_resting(empty_for: float) -> bool:
+    """True once nobody has been in view for RESTING_AFTER_SECONDS (since the last face, or the
+    tap that started things), so the screen goes back to resting for the next people."""
+    return USE_RESTING_SCREEN and empty_for >= RESTING_AFTER_SECONDS - 1e-9
+
+
+def clock_text(t: dtime) -> str:
+    """dtime(16, 15) -> "4:15 p.m." (written out by hand: strftime's no-zero-padding flag differs by OS)."""
+    return f"{t.hour % 12 or 12}:{t.minute:02d} {'a.m.' if t.hour < 12 else 'p.m.'}"
 
 
 def filters_are_off(local_now=None) -> bool:
@@ -1035,6 +1057,17 @@ def draw_timer(frame, face: Face, now: float, draw: bool = True) -> tuple:
     return gentle, used >= TIMER_FIRM_SECONDS
 
 
+def draw_resting(frame, filters, people: int) -> None:
+    """The resting screen for the --window view (the dashboard page draws its own)."""
+    h, w = frame.shape[:2]
+    frame[:] = cv2.addWeighted(cv2.GaussianBlur(frame, (0, 0), 12), 0.35, np.zeros_like(frame), 0.65, 0)
+    draw_text(frame, "Try on a filter", w / 2, h * 0.3, 1.2, (255, 255, 255), 2)
+    draw_text(frame, "   ".join(f.name for f in filters), w / 2, h * 0.45, 0.6, (255, 255, 255), 1)
+    ask = "Hi! Click here or press space to start" if people else "Click here or press space to start"
+    draw_text(frame, ask, w / 2, h * 0.62, 0.8, (0, 200, 255), 2)
+    draw_text(frame, "Then stand within 2.5 feet and look at the screen", w / 2, h * 0.72, 0.5, (220, 220, 220))
+
+
 def draw_debug(frame, face: Face) -> None:
     x, y, w, h = (int(v) for v in face.box)
     color = (0, 255, 0) if face.opted_in else (0, 0, 255)
@@ -1085,7 +1118,8 @@ def process_faces(frame, faces, filters, active, now, dt, filters_off=None, draw
 
 
 # --- Main camera loop ---
-KEY_ACTIONS = {ord('n'): "next", ord('d'): "debug", ord('c'): "calibrate", ord('z'): "zone", ord('l'): "log"}
+KEY_ACTIONS = {ord('n'): "next", ord('d'): "debug", ord('c'): "calibrate", ord('z'): "zone", ord('l'): "log",
+               ord(' '): "start", 13: "start"}
 
 
 def save_calibration(saved: dict, what: str = None) -> None:
@@ -1144,6 +1178,11 @@ def main(argv=None):
             open_browser(dashboard.url, kiosk=is_raspberry_pi())
     else:
         print("Running. q = quit, n = next filter, d = debug view, c = calibrate forward, l = record angles.")
+        print("Click the window or press space to leave the resting screen.")
+        cv2.namedWindow("Hallway Filter")
+        clicks = []   # a click on the window starts things, like a tap on the dashboard
+        cv2.setMouseCallback("Hallway Filter",
+                             lambda event, *_: clicks.append(("start", None)) if event == cv2.EVENT_LBUTTONDOWN else None)
     log_file = log = None
 
     faces = {}
@@ -1159,6 +1198,7 @@ def main(argv=None):
     focal_set = False
     zone_cal = None           # pressing z: eye-gap samples from someone exactly 30 inches away
     zone_note = ""
+    resting = USE_RESTING_SCREEN   # the resting screen is up until someone taps it
 
     try:
         while True:
@@ -1217,8 +1257,14 @@ def main(argv=None):
             # In dashboard mode the page shows the notes and reminders in its own type, so the
             # picture stays clean. The --window view draws them onto the frame like before.
             draw_notes = dashboard is None
+            # Everyone has left for a while: back to the resting screen for the next people
+            if any(f.last_seen == now for f in faces.values()):
+                nobody_since = now
+            if not resting and back_to_resting(now - nobody_since):
+                resting = True
+            # While resting nobody gets a filter or the privacy intro: that starts with a tap
             seen_faces, firm, anyone, gentle = process_faces(
-                frame, faces, filters, active, now, dt, filters_off, draw_notes)
+                frame, faces, filters, active, now, dt, filters_off or resting, draw_notes)
             # Privacy intro: someone is in the zone but hasn't had their 3 seconds yet, and nobody
             # is using a filter. The page shows the privacy note in the middle with a countdown.
             waiting = [f for f in seen_faces if f.eligible_since is not None and not f.opted_in]
@@ -1266,7 +1312,9 @@ def main(argv=None):
                         "filters": [f.name for f in filters], "active": current, "auto": auto,
                         "switch_in": max(0.0, next_switch - now) if auto and len(filters) > 1 else None,
                         "switch_every": FILTER_SWITCH_SECONDS,
-                        "hint": USE_HINT_TEXT and not anyone and not filters_off and intro is None,
+                        "hint": USE_HINT_TEXT and not anyone and not filters_off and intro is None and not resting,
+                        "resting": resting,   # the resting screen is up (nobody has tapped yet)
+                        "on_until": clock_text(FILTERS_OFF_AT) if USE_SCHEDULE else None,   # shown on it
                         "in_use": anyone,   # someone has a filter on right now
                         "intro": None if intro is None else round(intro, 3),   # 0 -> 1 over 3 seconds
                         "dwell": DWELL_SECONDS,
@@ -1278,6 +1326,8 @@ def main(argv=None):
                     }
                 actions = list(dashboard.pending())
             else:
+                if resting and not filters_off:
+                    draw_resting(frame, filters, len(seen_faces))
                 if intro is not None:
                     left = math.ceil(DWELL_SECONDS * (1 - intro))
                     draw_text(frame, "This camera doesn't record. Pictures never leave this computer.", w / 2, h / 2 - 12,
@@ -1287,7 +1337,7 @@ def main(argv=None):
                     draw_text(frame, "3 minutes are up! Time to get back to what you were doing.", w / 2, 40, 0.7, (0, 200, 255), 2)
                 if filters_off:
                     draw_text(frame, "Filters are off right now. They're back at 7:30 a.m.", w / 2, h - 16, 0.5, (200, 200, 200))
-                elif USE_HINT_TEXT and not anyone:
+                elif USE_HINT_TEXT and not anyone and not resting:
                     draw_text(frame, "Step up close and look here to try a filter", w / 2, h - 16, 0.5, (255, 255, 255))
                 draw_text(frame, "This camera doesn't record: pictures never leave this computer and are never saved.",
                           w / 2, h - 52, 0.42, (255, 255, 255))
@@ -1298,9 +1348,19 @@ def main(argv=None):
                     break
                 if key in KEY_ACTIONS:
                     actions.append((KEY_ACTIONS[key], None))
+                actions += clicks
+                clicks.clear()
 
             for action, value in actions:
-                if action == "next":
+                if action == "start":
+                    # Someone tapped the resting screen. Tapping one of its filters starts with that one
+                    if resting:
+                        print("Started from the resting screen")
+                    resting = False
+                    nobody_since = now   # they're at the screen, even if the camera hasn't found them yet
+                    if isinstance(value, int) and 0 <= value < len(filters):
+                        current, auto = value, False
+                elif action == "next":
                     current = (current + 1) % len(filters)
                     next_switch = now + FILTER_SWITCH_SECONDS
                 elif action == "select" and 0 <= value < len(filters):

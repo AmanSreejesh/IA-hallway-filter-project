@@ -658,6 +658,46 @@ class DwellTests(unittest.TestCase):
         self.assertIn(round(16.1, 6), [round(t, 6) for t in drawn])   # straight back on, no 3 s wait
 
 
+class RestingScreenTests(unittest.TestCase):
+    """The resting screen: nothing starts until someone taps, and it comes back once everyone has
+    been gone for RESTING_AFTER_SECONDS."""
+
+    def test_comes_back_after_five_seconds_with_nobody_in_view(self):
+        self.assertEqual(system.RESTING_AFTER_SECONDS, 5)
+        self.assertFalse(system.back_to_resting(0.0))
+        self.assertFalse(system.back_to_resting(4.9))
+        self.assertTrue(system.back_to_resting(5.0))
+        with patch.object(system, "USE_RESTING_SCREEN", False):
+            self.assertFalse(system.back_to_resting(60.0))
+
+    def test_nobody_gets_a_filter_or_the_intro_while_resting(self):
+        # main.py holds everyone back the same way the schedule does while the resting screen is up
+        with patch.object(system, "DWELL_SECONDS", 0.0), patch.dict(system.FORWARD, yaw=0.0, pitch=0.0), \
+                patch("viraj.emoji_filter.RENDERER", "software"), contextlib.redirect_stdout(io.StringIO()):
+            effect = RecordingFilter(system.load_filters(["clown_nose"])[0])
+            faces = {}
+            for t in np.arange(0, 4.01, 0.1):
+                AcceptanceTests.step(self, faces, effect, 10 + t, [detection()], off=True)
+            self.assertEqual(effect.calls, [])
+            self.assertTrue(all(f.eligible_since is None and not f.opted_in for f in faces.values()))
+
+    def test_dashboard_accepts_start_with_or_without_a_filter(self):
+        import json
+        from common import dashboard_server
+        self.assertIn("start", dashboard_server.ACTIONS)
+        handler = dashboard_server._Handler.__new__(dashboard_server._Handler)
+        sent = []
+        handler.dashboard = SimpleNamespace(commands=SimpleNamespace(put=sent.append))
+        handler.path = "/api/do"
+        handler._send = lambda code, *a, **k: sent.append(code)
+        for body in ({"action": "start"}, {"action": "start", "value": 2}, {"action": "start", "value": "x"}):
+            raw = json.dumps(body).encode()
+            handler.headers = {"Content-Length": str(len(raw))}
+            handler.rfile = io.BytesIO(raw)
+            handler.do_POST()
+        self.assertEqual(sent, [("start", None), 204, ("start", 2), 204, 400])
+
+
 class DashboardStateTests(unittest.TestCase):
     def test_dashboard_state_has_no_duplicate_keys(self):
         # A repeated key silently replaces the first one; "active" once got overwritten this way,

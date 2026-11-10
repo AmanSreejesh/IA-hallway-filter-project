@@ -56,6 +56,31 @@
   <div class="hub" id="hub"></div>
 </div>
 
+<!-- Resting screen: up while nobody's using the display. A clock, the question, and the four
+     filters taking turns in the big frame. The whole screen is the button. Nothing starts until someone taps (tapping a
+     filter starts with that one). It comes back once nobody has been in view for 5 seconds. -->
+<section class="rest" id="rest" aria-label="Tap anywhere to start">
+  <div class="rest-blob" id="restBlob" aria-hidden="true"></div>
+  <div class="rest-left">
+    <div class="rest-clock"><p class="rest-time" id="restTime"></p><p class="rest-date" id="restDate"></p></div>
+    <div class="rest-pitch">
+      <h1 class="rest-title">Hi, want to try on a filter?</h1>
+      <p class="rest-tap"><span class="tap-mark" aria-hidden="true"><span></span></span>Tap anywhere to start</p>
+    </div>
+    <div class="rest-status">
+      <p class="rest-until" id="restUntil"></p>
+      <p class="rest-privacy">This camera doesn't record. Pictures never leave this computer and are never saved.</p>
+    </div>
+  </div>
+  <div class="rest-right">
+    <div class="rest-feature">
+      <div class="rest-stage" id="restStage"></div>
+      <div class="rest-caption" id="restCaption"><p class="rest-name" id="restName"></p><p class="rest-what" id="restWhat"></p></div>
+    </div>
+    <div class="rest-rail" id="restRail" role="list"></div>
+  </div>
+</section>
+
 <!-- Staff only: hold the top-left corner for 2 seconds -->
 <div class="corner" id="corner" aria-hidden="true"></div>
 <div class="card-wrap staff" id="staff" hidden>
@@ -69,6 +94,7 @@
   </div>
 </div>
 
+<script src="rest-art.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

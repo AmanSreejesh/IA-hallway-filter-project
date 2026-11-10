@@ -33,6 +33,14 @@ frames are never saved. Press `q` or Escape to quit, `n` to switch filters,
 calibrate forward. Press `z` at a measured 30 inches to calibrate distance.
 `l` explicitly starts/stops a local numeric pose log.
 
+While nobody is using the display it shows a resting screen: the time, "Hi, want to try on a
+filter?", and the four filters taking turns in a big frame. Nothing starts until someone taps the
+screen (tapping one of the filters starts with that one). Then the privacy intro and filters work as
+below. Once nobody has been in view for 5 seconds (`RESTING_AFTER_SECONDS`) the resting screen
+comes back. `USE_RESTING_SCREEN = False` in `common/main.py` turns it off. In `--window` mode, click
+the window or press space to start. The dashboard font is Schibsted Grotesk (SIL Open Font License,
+in `common/dashboard/fonts/`).
+
 All four filters activate on the first eligible detection within the inclusive
 30-inch (2.5-foot) opt-in zone, with no waiting period. The first visible opacity
 is 0.1 at 30 inches, increasing with proximity to 1 at 25 inches. Head angles up to

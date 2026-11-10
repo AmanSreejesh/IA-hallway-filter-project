@@ -199,6 +199,7 @@ function render() {
     if (!open) showName();
   }
   showMessage();
+  updateRest();
   $("off").classList.toggle("on", state.off);
   $("firm").classList.toggle("on", state.firm && !state.off);
   $("debug").textContent = `Debug view: ${state.debug ? "on" : "off"}`;
@@ -364,7 +365,10 @@ function updatePrivacy() {
   $("intro").classList.toggle("on", intro && performance.now() - introStart < introMs);
   showIntro();
 
-  if (intro || state.in_use) {
+  if (resting) {
+    privacyAway = true;   // the resting screen has its own privacy line
+    lastBusy = now - PRIVACY_IDLE_BACK;
+  } else if (intro || state.in_use) {
     privacyAway = true;
     lastBusy = now;
   } else if (privacyAway && (isLost || (state.empty_for ?? 0) >= PRIVACY_BACK_AFTER || now - lastBusy >= PRIVACY_IDLE_BACK)) {
@@ -413,6 +417,7 @@ $("staff").addEventListener("click", (e) => {
 document.addEventListener("keydown", (e) => {
   if (e.metaKey || e.ctrlKey || e.altKey || !filters.length) return;
   const k = e.key.toLowerCase();
+  if (resting && (k === " " || k === "enter")) { startFromRest(null); return; }
   if (k === "arrowright" || k === "arrowleft") {
     angle.t = Math.round(angle.t / span) * span + (k === "arrowright" ? -span : span);
     kick();
@@ -432,4 +437,185 @@ document.addEventListener("pointermove", () => {
   document.body.classList.remove("idle");
   clearTimeout(idleCursor);
   idleCursor = setTimeout(() => document.body.classList.add("idle"), 3000);
+});
+
+
+// ---------- resting screen ----------
+// Up whenever main.py says nobody's using the display (state.resting). The filters take turns in
+// the big frame: each one opens out of the middle, starts as a plain face, and a line sweeps
+// across to put the filter on. A tap anywhere tells main.py to start (tapping a filter starts with
+// that one); main.py brings this screen back once nobody has been in view for 5 seconds.
+const REST = {
+  emoji: { color: "#E9A23B", tint: "#F1DDB6", what: "Your whole head turns into an emoji, and you get a new one every few seconds." },
+  sharingan: { color: "#B8433A", tint: "#EBCFC6", what: "Red spinning eyes that move with yours. Hold still and stare." },
+  helmet: { color: "#3A6EA5", tint: "#D3DDE8", what: "Your own space helmet. The visor's clear, so it's still you inside." },
+  clown: { color: "#4C8C5A", tint: "#D3E1CF", what: "A big red nose that stays put, however much you wiggle." },
+};
+const REST_SPARE = [["#7A5BA6", "#DDD3E6"], ["#2F7F7F", "#CFE1DE"], ["#A6623A", "#EBD8C8"]];
+const REST_TAP_GRACE = 2500;      // ms to trust a tap before main.py's next update confirms it
+let resting = false;
+let restNames = "";
+let restItems = [];
+let restLit = -1;
+let restTapAt = -1e9;
+let restTimer = 0;
+let restSweep = 0;
+let emojiTimer = 0;
+
+function restKey(name) {
+  return Object.keys(REST).find((k) => name.toLowerCase().includes(k)) || "other";
+}
+
+function restTurnMs() {
+  const v = parseFloat(getComputedStyle($("rest")).getPropertyValue("--turn"));
+  return (Number.isFinite(v) && v > 0 ? v : 5) * 1000;
+}
+
+function buildRest(names) {
+  restItems = names.map((name, i) => {
+    const key = restKey(name);
+    const spare = REST_SPARE[i % REST_SPARE.length];
+    const r = REST[key] || { color: spare[0], tint: spare[1], what: "Tap to try it on." };
+    return { name: name.replace(/[<>&"]/g, ""), key, ...r };
+  });
+  $("restStage").innerHTML = restItems.map((f, i) =>
+    `<div class="slide" style="--c:${f.color}">${RestArt.picture(f.key, "st" + i, f.color)}<span class="slide-line"></span></div>`).join("");
+  $("restRail").innerHTML = restItems.map((f, i) =>
+    `<div class="thumb" role="listitem" data-index="${i}" aria-label="${f.name}: tap to try">
+      <div class="thumb-frame" style="--c:${f.color}">${RestArt.picture(f.key, "th" + i, f.color)}</div>
+      <p class="thumb-name">${f.name}</p><div class="thumb-bar"></div>
+    </div>`).join("");
+  restNames = names.join("|");
+  restLit = -1;
+}
+
+// The next filter opens out of the middle of the big frame
+function showRest(i) {
+  if (!restItems.length) return;
+  const prev = restLit;
+  restLit = mod(i, restItems.length);
+  const f = restItems[restLit];
+  const slides = [...$("restStage").children];
+  slides.forEach((el, j) => {
+    el.classList.remove("now", "under");
+    if (j === prev && j !== restLit) el.classList.add("under");
+  });
+  const slide = slides[restLit];
+  void slide.offsetWidth;   // start the opening from nothing, even if it was just showing
+  slide.classList.add("now");
+  $("rest").style.setProperty("--tint", f.tint);
+  [...$("restRail").children].forEach((t, j) => {
+    t.classList.remove("now");
+    if (j === restLit) { void t.offsetWidth; t.classList.add("now"); }   // restarts its timer line
+  });
+  const cap = $("restCaption");
+  cap.classList.add("swap");
+  setTimeout(() => {
+    $("restName").textContent = f.name;
+    $("restWhat").textContent = f.what;
+    cap.classList.remove("swap");
+  }, prev < 0 ? 0 : 260);
+  sweep(slide);
+}
+
+// Plain face first, then a line glides across and the filter goes on behind it
+function sweep(slide) {
+  cancelAnimationFrame(restSweep);
+  const wipe = slide.querySelector(".wipe");
+  const line = slide.querySelector(".slide-line");
+  const scan = slide.querySelector(".scan");
+  if (scan) scan.setAttribute("opacity", "0");
+  if (!wipe || !line) return;
+  const begin = performance.now() + 1100, ms = 1400;
+  wipe.setAttribute("x", "240");
+  line.style.left = "100%";
+  line.style.opacity = "0";
+  const tick = (now) => {
+    const p = Math.max(0, Math.min(1, (now - begin) / ms));
+    const e = p < 0.5 ? 4 * p * p * p : 1 - Math.pow(-2 * p + 2, 3) / 2;
+    const x = 200 * (1 - e);
+    wipe.setAttribute("x", String(p >= 1 ? -40 : x));
+    line.style.left = `${(x / 200) * 100}%`;
+    line.style.opacity = p > 0 && p < 1 ? "1" : "0";
+    if (p < 1) restSweep = requestAnimationFrame(tick);
+  };
+  restSweep = requestAnimationFrame(tick);
+}
+
+// The emoji in the big frame swaps faces, like the real filter swapping emojis
+function nextEmoji() {
+  document.querySelectorAll(".rest-stage .emo").forEach((g) => {
+    const faces = [...g.querySelectorAll(".expr")];
+    const k = faces.findIndex((f) => f.classList.contains("on"));
+    faces.forEach((f, j) => f.classList.toggle("on", j === (k + 1) % faces.length));
+  });
+}
+
+function updateRest() {
+  const want = !!state.resting && !state.off && performance.now() - restTapAt > REST_TAP_GRACE;
+  if (state.filters.join("|") !== restNames) {
+    buildRest(state.filters);
+    if (resting) showRest(0);
+  }
+  const rest = $("rest");
+  rest.classList.toggle("noticed", want && state.people > 0);   // someone's in view: the tap ring hurries
+  $("restUntil").textContent = state.on_until ? `Filters are on until ${state.on_until} today` : "";
+  if (want === resting) return;
+  resting = want;
+  document.body.classList.toggle("resting", resting);
+  clearInterval(restTimer);
+  clearInterval(emojiTimer);
+  if (resting) {
+    rest.classList.remove("leaving");
+    rest.classList.add("on");
+    if (open) setOpen(false);
+    showRest(state.active ?? 0);
+    restTimer = setInterval(() => showRest(restLit + 1), restTurnMs());
+    emojiTimer = setInterval(nextEmoji, 1600);
+  } else {
+    rest.classList.remove("on");
+    cancelAnimationFrame(restSweep);
+  }
+}
+
+function startFromRest(index) {
+  if (!resting) return;
+  restTapAt = performance.now();
+  send("start", index);
+  if (index != null) {
+    lastPick = performance.now();   // the wheel turns to their pick straight away
+    spinTo(index);
+    if (state) state.active = index;
+  }
+  const rest = $("rest");
+  rest.classList.add("leaving");
+  resting = false;
+  clearInterval(restTimer);
+  clearInterval(emojiTimer);
+  cancelAnimationFrame(restSweep);
+  setTimeout(() => {
+    document.body.classList.remove("resting");
+    rest.classList.remove("on", "leaving");
+    if (index != null) showName();
+    updatePrivacy();
+  }, 450);
+}
+
+// The clock in the corner (this computer's own time, the same clock the schedule uses)
+function tickClock() {
+  const now = new Date();
+  $("restTime").textContent = now.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  $("restDate").textContent = now.toLocaleDateString([], { weekday: "long", month: "long", day: "numeric" });
+}
+tickClock();
+setInterval(tickClock, 5000);
+
+// The whole screen is the button. A filter (in the big frame or down the side) starts with that one
+$("rest").addEventListener("pointerdown", (e) => {
+  e.stopPropagation();
+  goFullscreen();
+  const thumb = e.target.closest(".thumb");
+  if (thumb) return startFromRest(Number(thumb.dataset.index));
+  if (e.target.closest(".rest-stage") && restLit >= 0) return startFromRest(restLit);
+  startFromRest(null);
 });

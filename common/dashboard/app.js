@@ -199,6 +199,7 @@ function render() {
     if (!open) showName();
   }
   showMessage();
+  setClock(state);
   updateRest();
   $("off").classList.toggle("on", state.off);
   $("firm").classList.toggle("on", state.firm && !state.off);
@@ -447,7 +448,7 @@ document.addEventListener("pointermove", () => {
 // that one); main.py brings this screen back once nobody has been in view for 5 seconds.
 const REST = {
   emoji: { color: "#E9A23B", tint: "#F1DDB6", what: "Your whole head turns into an emoji, and you get a new one every few seconds." },
-  sharingan: { color: "#B8433A", tint: "#EBCFC6", what: "Red spinning eyes that move with yours. Hold still and stare." },
+  sharingan: { color: "#B8433A", tint: "#EBCFC6", what: "The Sharingan from Naruto. Red eyes, spinning tomoe, full Uchiha." },
   helmet: { color: "#3A6EA5", tint: "#D3DDE8", what: "Your own space helmet. The visor's clear, so it's still you inside." },
   clown: { color: "#4C8C5A", tint: "#D3E1CF", what: "A big red nose that stays put, however much you wiggle." },
 };
@@ -559,7 +560,6 @@ function updateRest() {
   }
   const rest = $("rest");
   rest.classList.toggle("noticed", want && state.people > 0);   // someone's in view: the tap ring hurries
-  $("restUntil").textContent = state.on_until ? `Filters are on until ${state.on_until} today` : "";
   if (want === resting) return;
   resting = want;
   document.body.classList.toggle("resting", resting);
@@ -601,13 +601,27 @@ function startFromRest(index) {
   }, 450);
 }
 
-// The clock in the corner (this computer's own time, the same clock the schedule uses)
+// The clock in the corner shows school time, the same clock the 4:15 cutoff uses: main.py sends
+// the real (internet) time and the school's timezone, because this computer's clock can't be
+// trusted. Blank until the first update arrives, rather than showing the wrong time.
+let clockOffset = null;   // ms to add to this computer's clock to get the real time
+let clockZone;
 function tickClock() {
-  const now = new Date();
-  $("restTime").textContent = now.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-  $("restDate").textContent = now.toLocaleDateString([], { weekday: "long", month: "long", day: "numeric" });
+  if (clockOffset == null) return;
+  const now = new Date(Date.now() + clockOffset);
+  try {
+    $("restTime").textContent = now.toLocaleTimeString([], { hour: "numeric", minute: "2-digit", timeZone: clockZone });
+    $("restDate").textContent = now.toLocaleDateString([], { weekday: "long", month: "long", day: "numeric", timeZone: clockZone });
+  } catch {   // an unknown timezone name: show it in this computer's zone rather than nothing
+    clockZone = undefined;
+  }
 }
-tickClock();
+function setClock(s) {
+  if (typeof s.clock_ms !== "number") return;
+  clockOffset = s.clock_ms - Date.now();
+  clockZone = s.timezone || undefined;
+  tickClock();
+}
 setInterval(tickClock, 5000);
 
 // The whole screen is the button. A filter (in the big frame or down the side) starts with that one

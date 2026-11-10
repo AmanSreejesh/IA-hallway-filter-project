@@ -4,7 +4,7 @@ These verify shared decisions and artwork against synthetic measured geometry.
 Live detector accuracy and physical pass rates require the trials in ACCEPTANCE.md.
 """
 import contextlib
-from datetime import datetime
+from datetime import datetime, timezone
 import io
 import math
 from types import SimpleNamespace
@@ -487,8 +487,7 @@ class AcceptanceTests(unittest.TestCase):
             self.step(faces, effect, float(now), [detection()])
         calls = len(effect.calls)
         self.assertGreater(calls, 0)
-        with patch.object(system, "datetime") as clock:
-            clock.now.return_value = datetime(2026, 11, 5, 16, 15)
+        with patch.object(system.school_clock, "now", return_value=datetime(2026, 11, 5, 16, 15)):
             faces[0].last_seen = 13.2
             system.process_faces(np.zeros((480, 640, 3), np.uint8), faces, [effect], effect,
                                  13.2, 0.1, draw_notes=False)
@@ -656,6 +655,69 @@ class DwellTests(unittest.TestCase):
         frames += [(16 + t, detection()) for t in np.arange(0.1, 1.01, 0.1)]     # comes back
         _, drawn = self.visit(frames)
         self.assertIn(round(16.1, 6), [round(t, 6) for t in drawn])   # straight back on, no 3 s wait
+
+
+class SchoolClockTests(unittest.TestCase):
+    """The schedule and the resting screen's clock use internet time in the school's timezone,
+    never the Pi's own clock (which can be wrong)."""
+
+    def setUp(self):
+        clock = system.school_clock
+        saved = (clock._base, clock._source, clock._warned)
+        self.addCleanup(lambda: setattr(clock, "_base", saved[0]) or setattr(clock, "_source", saved[1])
+                        or setattr(clock, "_warned", saved[2]))
+        self.quiet = contextlib.redirect_stdout(io.StringIO())
+        self.quiet.__enter__()
+        self.addCleanup(self.quiet.__exit__, None, None, None)
+
+    def test_ignores_a_wrong_pi_clock(self):
+        clock = system.school_clock
+        real = datetime(2026, 11, 5, 21, 15, tzinfo=timezone.utc).timestamp()   # 4:15 pm in New York
+        with patch.object(clock, "_from_ntp", return_value=(real, 100.0)), \
+                patch.object(clock.time, "monotonic", return_value=100.0), \
+                patch.object(clock.time, "time", return_value=real - 9 * 3600):   # the Pi is 9 hours out
+            self.assertTrue(clock.sync())
+            t = clock.now()
+            self.assertEqual((t.hour, t.minute, str(t.tzinfo)), (16, 15, "America/New_York"))
+            self.assertTrue(system.filters_are_off())   # the cutoff uses the real time
+        with patch.object(clock.time, "monotonic", return_value=100.0 - 60):     # a minute earlier
+            self.assertFalse(system.filters_are_off())
+
+    def test_keeps_counting_from_the_answer_and_handles_daylight_saving(self):
+        clock = system.school_clock
+        july = datetime(2026, 7, 1, 11, 29, 30, tzinfo=timezone.utc).timestamp()   # 7:29:30 am EDT
+        with patch.object(clock, "_from_ntp", return_value=(july, 50.0)), patch.object(clock.time, "monotonic", return_value=50.0):
+            clock.sync()
+            self.assertEqual(clock.now().utcoffset().total_seconds(), -4 * 3600)
+            self.assertTrue(system.filters_are_off())
+        with patch.object(clock.time, "monotonic", return_value=50.0 + 30):     # 30 s later: 7:30
+            self.assertFalse(system.filters_are_off())
+
+    def test_falls_back_to_a_web_date_stamp_when_time_servers_are_blocked(self):
+        clock = system.school_clock
+        real = datetime(2026, 11, 5, 15, 0, tzinfo=timezone.utc).timestamp()
+        with patch.object(clock, "_from_ntp", side_effect=OSError("blocked")), \
+                patch.object(clock, "_from_web", return_value=(real, 10.0)) as web, \
+                patch.object(clock.time, "monotonic", return_value=10.0):
+            self.assertTrue(clock.sync())
+            self.assertEqual(clock.now().hour, 10)
+        web.assert_called()
+        self.assertIn("web", clock._source)
+
+    def test_without_internet_uses_the_pi_clock_in_the_school_timezone(self):
+        clock = system.school_clock
+        clock._base = None
+        with patch.object(clock, "_from_ntp", side_effect=OSError), patch.object(clock, "_from_web", side_effect=OSError):
+            self.assertFalse(clock.sync())
+        pi = datetime(2026, 11, 5, 12, 0, tzinfo=timezone.utc).timestamp()
+        with patch.object(clock.time, "time", return_value=pi):
+            self.assertEqual((clock.now().hour, str(clock.now().tzinfo)), (7, "America/New_York"))
+
+    def test_main_never_reads_the_computer_clock_for_the_time_of_day(self):
+        with open(system.__file__) as source:
+            code = source.read()
+        for banned in ("datetime.now(", "time.time(", "time.localtime(", "date.today("):
+            self.assertNotIn(banned, code)
 
 
 class RestingScreenTests(unittest.TestCase):

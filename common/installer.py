@@ -17,6 +17,8 @@ PACKAGES = [
     ("numpy", "numpy>=1.26,<3", True),
     ("mediapipe", "mediapipe>=1.2,<2", False),   # without it: YuNet tracking, Sharingan skipped
     ("moderngl", "moderngl", False),            # without it: 3D emojis drawn with OpenCV
+    ("ntplib", "ntplib", False),                # internet time for the schedule (without it: a web page's Date stamp)
+    ("tzdata", "tzdata", False),                # timezone list, for computers that don't have one (Windows)
 ]
 # Optional packages that couldn't be installed on this computer, so startup doesn't retry every time.
 # Delete this file to try again.

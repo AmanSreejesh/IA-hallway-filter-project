@@ -3,4 +3,6 @@ opencv-contrib-python>=4.11,<6  # also used by MediaPipe; install only one OpenC
 numpy>=1.26,<3
 mediapipe>=1.2,<2   # Tasks API with iris landmarks; required for Sharingan (0.10 has no Raspberry Pi build)
 moderngl    # faster, smoother 3D emojis (without it, they're drawn with OpenCV)
+ntplib      # the real time from internet time servers, for the 4:15 p.m. cutoff (see common/school_clock.py)
+tzdata      # timezone list for computers without one (Windows); harmless elsewhere
 # common/main.py installs anything missing from this list by itself (see common/installer.py).

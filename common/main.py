@@ -74,7 +74,7 @@ import threading
 import time
 from collections import deque
 import urllib.request
-from datetime import datetime, time as dtime
+from datetime import time as dtime
 
 COMMON_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(COMMON_DIR))   # repo root, so "viraj.emoji_filter" imports
@@ -85,6 +85,7 @@ ensure_packages()   # installs OpenCV, NumPy, MediaPipe... the first time, if th
 
 import cv2  # noqa: E402
 import numpy as np  # noqa: E402
+import school_clock  # noqa: E402  (the real time from the internet: the Pi's clock can't be trusted)
 
 MODEL_PATH = os.path.join(COMMON_DIR, "face_detection_yunet_2023mar.onnx")
 MODEL_URL = ("https://github.com/opencv/opencv_zoo/raw/main/models/"
@@ -114,7 +115,8 @@ USE_TIMER = True          # 1 minute note and 3 minute reminder
 USE_MULTI_USER = True     # everyone in view gets a filter (off = only the closest person)
 USE_ENGAGEMENT = False    # switch filters by itself every FILTER_SWITCH_SECONDS. Off: the filter only
                           # changes when someone picks one on the wheel (or presses n)
-USE_SCHEDULE = True       # filters are off from FILTERS_OFF_AT to FILTERS_ON_AT (local time). Set to False
+USE_SCHEDULE = True       # filters are off from FILTERS_OFF_AT to FILTERS_ON_AT (school time, see
+                          # school_clock.py: internet time in the school's timezone). Set to False
                           # for after-school events like showcases
 USE_HINT_TEXT = True      # "Step up close..." message when nobody is using a filter
 USE_RESTING_SCREEN = True # the resting screen: shows the four filters and asks people to tap the screen.
@@ -179,7 +181,8 @@ FILTER_SWITCH_SECONDS = 30    # rotate to the next filter this often
 RESTING_AFTER_SECONDS = 5     # everyone has left (nobody in view) this long: back to the resting screen
 
 # Schedule: filters turn off after dismissal so nobody heading to the buses gets stopped,
-# and come back on in the morning
+# and come back on in the morning. These are school times (school_clock.TIMEZONE, Eastern),
+# whatever the Pi's own clock or timezone says.
 FILTERS_OFF_AT = dtime(16, 15)   # 4:15 pm
 FILTERS_ON_AT = dtime(7, 30)     # 7:30 am
 
@@ -190,16 +193,11 @@ def back_to_resting(empty_for: float) -> bool:
     return USE_RESTING_SCREEN and empty_for >= RESTING_AFTER_SECONDS - 1e-9
 
 
-def clock_text(t: dtime) -> str:
-    """dtime(16, 15) -> "4:15 p.m." (written out by hand: strftime's no-zero-padding flag differs by OS)."""
-    return f"{t.hour % 12 or 12}:{t.minute:02d} {'a.m.' if t.hour < 12 else 'p.m.'}"
-
-
-def filters_are_off(local_now=None) -> bool:
-    """Use the display computer's local clock. Off from exactly 4:15 pm, overnight, until exactly
-    7:30 am (7:30 itself is on)."""
-    local_now = datetime.now() if local_now is None else local_now
-    now = local_now.time()
+def filters_are_off(school_now=None) -> bool:
+    """Off from exactly 4:15 pm, overnight, until exactly 7:30 am (7:30 itself is on), by the
+    school's clock: internet time in the school's timezone, not the Pi's own clock."""
+    school_now = school_clock.now() if school_now is None else school_now
+    now = school_now.time()
     return USE_SCHEDULE and (now >= FILTERS_OFF_AT or now < FILTERS_ON_AT)
 
 
@@ -537,8 +535,8 @@ class Camera:
     def shows_picture(self, seconds=3.0):
         """True once a frame isn't pure black. Some cameras (like an iPhone the Mac picked up
         as a Continuity Camera) open fine but only ever send black frames."""
-        end = time.time() + seconds
-        while self.running and time.time() < end:
+        end = time.monotonic() + seconds   # (a timer: the clock jumping can't cut it short)
+        while self.running and time.monotonic() < end:
             frame = self.read()
             if frame is not None and frame.max() > 30:
                 return True
@@ -1157,6 +1155,7 @@ def main(argv=None):
     tracker = None
     saved = load_calibration()  # "looking forward" calibration, one per tracker
 
+    school_clock.start()      # fetches the real time in the background, then keeps it fresh
     cam = open_camera(args.camera)
     if not cam.running:
         print("Error: Could not open a camera. Check it's plugged in (unplug and replug a USB webcam),\n"
@@ -1314,7 +1313,9 @@ def main(argv=None):
                         "switch_every": FILTER_SWITCH_SECONDS,
                         "hint": USE_HINT_TEXT and not anyone and not filters_off and intro is None and not resting,
                         "resting": resting,   # the resting screen is up (nobody has tapped yet)
-                        "on_until": clock_text(FILTERS_OFF_AT) if USE_SCHEDULE else None,   # shown on it
+                        # the resting screen's clock shows school time, not the Pi's clock
+                        "clock_ms": round(school_clock.now().timestamp() * 1000),
+                        "timezone": school_clock.TIMEZONE,
                         "in_use": anyone,   # someone has a filter on right now
                         "intro": None if intro is None else round(intro, 3),   # 0 -> 1 over 3 seconds
                         "dwell": DWELL_SECONDS,

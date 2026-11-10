@@ -33,7 +33,7 @@ frames are never saved. Press `q` or Escape to quit, `n` to switch filters,
 calibrate forward. Press `z` at a measured 30 inches to calibrate distance.
 `l` explicitly starts/stops a local numeric pose log.
 
-While nobody is using the display it shows a resting screen: the time, "Hi, want to try on a
+While nobody is using the display it shows a resting screen: the school time, "Hi, want to try on a
 filter?", and the four filters taking turns in a big frame. Nothing starts until someone taps the
 screen (tapping one of the filters starts with that one). Then the privacy intro and filters work as
 below. Once nobody has been in view for 5 seconds (`RESTING_AFTER_SECONDS`) the resting screen
@@ -48,9 +48,13 @@ is 0.1 at 30 inches, increasing with proximity to 1 at 25 inches. Head angles up
 90-degree profile is rejected. Leaving the zone, losing detection, or exceeding
 the angle limit clears activation immediately. Re-entering applies the distance fade immediately.
 Head movement alone does not revoke activation. Filters turn off immediately at
-4:15 p.m. in the display computer's local timezone, including for existing users,
-and become available again at 7:30 a.m. Set the computer's timezone and clock
-for the school location.
+4:15 p.m. school time (Eastern), including for existing users, and become available
+again at 7:30 a.m. School time comes from the internet, not the display computer's
+clock (the Pi's clock can be wrong): `common/school_clock.py` asks internet time
+servers, or reads a web page's date stamp if those are blocked, converts it to
+`America/New_York` (daylight saving included) and re-checks every 30 minutes. The
+resting screen's clock uses the same time. Without internet it falls back to the
+computer's clock and says so in the terminal. Change `TIMEZONE` there if the display moves.
 
 Removing the waiting period supersedes the earlier requirement that visits under
 three seconds never show a filter. Brief visitors can receive an effect while

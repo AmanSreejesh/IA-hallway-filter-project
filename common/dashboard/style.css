@@ -295,7 +295,7 @@ body.resting .wheel, body.resting #name { opacity: 0 !important; pointer-events:
 
 .rest-left, .rest-right { position: relative; z-index: 1; min-height: 0; }
 
-/* Left: like a smart display. The time up top, the question, and when filters switch off */
+/* Left: like a smart display. The time up top, the question, and the privacy note */
 .rest-left { display: flex; flex-direction: column; justify-content: space-between; }
 .rest-time { font-size: clamp(40px, 6.4vh, 76px); font-weight: 700; letter-spacing: -0.03em; line-height: 1; }
 .rest-date { margin-top: 0.8vh; font-size: clamp(17px, 2.3vh, 26px); color: var(--muted); }
@@ -324,8 +324,6 @@ body.resting .wheel, body.resting #name { opacity: 0 !important; pointer-events:
 @keyframes press { 0%, 100% { transform: scale(1); } 20% { transform: scale(0.75); } 40% { transform: scale(1); } }
 .rest.noticed .tap-mark::before, .rest.noticed .tap-mark > span { animation-duration: 1.3s; }
 .rest-status { display: grid; gap: 1vh; }
-.rest-until { font-size: clamp(17px, 2.3vh, 26px); font-weight: 500; }
-.rest-until:empty { display: none; }
 .rest-privacy { font-size: clamp(14px, 1.8vh, 20px); line-height: 1.35; color: var(--muted); max-width: 40ch; }
 
 /* Right: the big frame with its caption, and all four filters down the side */

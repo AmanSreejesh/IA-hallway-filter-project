@@ -69,7 +69,7 @@ normal processing is separately asserted to keep the effect hidden there.
 
 ## Physical trial setup and record
 
-Use the deployed camera, display, lighting and installation timezone. Mark
+Use the deployed camera, display, lighting and network (the schedule needs internet time; check the terminal says "School clock: ..." at startup). Mark
 30 inches, 5 feet and 0.5 feet from the camera/filter installation. Ensure the
 camera can see both standing children's faces and seated faces. Enable debug
 view (`d`) to check distance and angles; calibrate forward (`c`) while looking

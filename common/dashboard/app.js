@@ -5,12 +5,12 @@
 const $ = (id) => document.getElementById(id);
 const wheel = $("wheel");
 
-// ---------- how each filter looks on the wheel ----------
+// ---------- how each filter looks on the wheel, and who made it ----------
 const LOOKS = {
-  emoji: { color: "#E8590C", icon: '<circle cx="12" cy="12" r="9"/><circle cx="9" cy="10" r="1.3" fill="#fff" stroke="none"/><circle cx="15" cy="10" r="1.3" fill="#fff" stroke="none"/><path d="M8 14.5c1 1.6 2.4 2.4 4 2.4s3-.8 4-2.4"/>' },
-  sharingan: { color: "#D6336C", icon: '<path d="M2.5 12C5 7.5 8.3 5.5 12 5.5s7 2 9.5 6.5C19 16.5 15.7 18.5 12 18.5S5 16.5 2.5 12Z"/><circle cx="12" cy="12" r="3.6"/><circle cx="12" cy="12" r="1.2" fill="#fff" stroke="none"/>' },
-  helmet: { color: "#1C7ED6", icon: '<circle cx="12" cy="11" r="8"/><rect x="7" y="8" width="10" height="6" rx="3"/><path d="M7 21h10"/>' },
-  clown: { color: "#2F9E44", icon: '<circle cx="12" cy="13" r="6.5"/><path d="M9.3 11a3 3 0 0 1 2.7-1.9"/>' },
+  emoji: { label: "Emoji", by: "Viraj", color: "#E8590C", icon: '<circle cx="12" cy="12" r="9"/><circle cx="9" cy="10" r="1.3" fill="#fff" stroke="none"/><circle cx="15" cy="10" r="1.3" fill="#fff" stroke="none"/><path d="M8 14.5c1 1.6 2.4 2.4 4 2.4s3-.8 4-2.4"/>' },
+  sharingan: { label: "Sharingan", by: "Aman", color: "#D6336C", icon: '<path d="M2.5 12C5 7.5 8.3 5.5 12 5.5s7 2 9.5 6.5C19 16.5 15.7 18.5 12 18.5S5 16.5 2.5 12Z"/><circle cx="12" cy="12" r="3.6"/><circle cx="12" cy="12" r="1.2" fill="#fff" stroke="none"/>' },
+  helmet: { label: "Astronaut Helmet", by: "Ishan", color: "#1C7ED6", icon: '<circle cx="12" cy="11" r="8"/><rect x="7" y="8" width="10" height="6" rx="3"/><path d="M7 21h10"/>' },
+  clown: { label: "Clown Nose", by: "Aryan", color: "#2F9E44", icon: '<circle cx="12" cy="13" r="6.5"/><path d="M9.3 11a3 3 0 0 1 2.7-1.9"/>' },
 };
 const SPARE_COLORS = ["#7048E8", "#0B7285", "#C2255C", "#5C940D"];
 
@@ -64,12 +64,13 @@ function frame(now) {
   const dt = Math.min(0.032, (now - last) / 1000);
   last = now;
   step(scale, dt);
-  if (!drag) step(angle, dt);
+  if (demo) rollDemo(now);
+  else if (!drag) step(angle, dt);
   step(hubPop, dt);
   step(flash, dt);
   draw();
   const still = [scale, angle, hubPop, flash].every((s) => Math.abs(s.t - s.x) < 0.002 && Math.abs(s.v) < 0.01);
-  if (still && !drag) {   // everything has settled: stop drawing until the next touch (saves the Pi)
+  if (still && !drag && !demo) {   // everything has settled: stop drawing until the next touch (saves the Pi)
     [scale, angle, hubPop, flash].forEach((s) => { s.x = s.t; s.v = 0; });
     draw();
     running = false;
@@ -114,7 +115,7 @@ function choose(k) {
   sel = k;
   const f = filters[k];
   $("hub").innerHTML = iconSvg(f.icon);
-  $("name").textContent = f.name;
+  $("name").innerHTML = f.by ? `${f.label} <span class="by">by ${f.by}</span>` : f.name.replace(/[<>&"]/g, "");
   $("pointer").setAttribute("fill", f.color);
   [...$("segs").children].forEach((p, i) => {
     p.style.strokeWidth = i === k ? 46 : 38;
@@ -146,7 +147,7 @@ function arc(r, a0, a1) {
 })();
 
 function buildWheel(names) {
-  filters = names.map((n, i) => ({ name: n, ...look(n, i) }));
+  filters = names.map((n, i) => ({ name: n, label: n, ...look(n, i) }));
   span = 360 / filters.length;
   const gap = filters.length > 1 ? 4 : 0.01;
   $("segs").innerHTML = filters.map((f, i) =>
@@ -193,8 +194,14 @@ feed.addEventListener("error", () => {
 
 function render() {
   if (filters.map((f) => f.name).join("|") !== state.filters.join("|")) buildWheel(state.filters);
+  // Their filter has just started (the privacy note is done): show them the wheel rolling to it
+  if (demoPending != null && state.in_use && !resting) {
+    runDemo(demoPending);
+    demoPending = null;
+  }
+  if (state.resting) demoPending = null;
   // The filter changed on its own (taking turns, or a key press): spin the wheel to it
-  if (!drag && performance.now() - lastPick > 2000 && sliceAt(angle.t) !== state.active) {
+  if (!drag && !demo && performance.now() - lastPick > 2000 && sliceAt(angle.t) !== state.active) {
     spinTo(state.active);
     if (!open) showName();
   }
@@ -210,11 +217,18 @@ function render() {
   if (sel < 0) draw();
 }
 
+// The little label beside the small wheel, while someone has a filter on
+function updateTip() {
+  $("wheelTip").classList.toggle("on", !!state && !!state.in_use && !resting && !open && !demo && !state.off);
+}
+
 function showMessage() {
+  updateTip();
   const m = $("message");
   let text = "";
   if (isLost) text = "Reconnecting…";
   else if (state.off || state.firm) text = "";
+  else if ((open || demo) && !resting) text = "Drag the wheel to switch filters";
   else if (state.gentle) text = "1 minute has passed";
   else if (state.hint) text = "Come closer";
   if (text) m.textContent = text;
@@ -237,6 +251,50 @@ function spinTo(i) {
   kick();
 }
 
+// ---------- the wheel shows itself off once ----------
+// Right after the privacy note, the wheel opens to full size, rolls round a couple of times and
+// lands on the filter they picked on the resting screen (or a random one), then shrinks back.
+// That way everyone sees there's a wheel and that it turns.
+const DEMO_TURNS = 2;
+const DEMO_MS = 3200;
+let demo = null;          // { from, to, start }
+let demoPending = null;   // filter to land on once their filter starts
+let demoTimer = 0;
+
+function runDemo(i) {
+  if (!filters.length) return;
+  const base = -mod(i, filters.length) * span;
+  const to = angle.x - mod(angle.x - base, 360) - 360 * DEMO_TURNS;   // lands exactly on slice i
+  angle.v = 0;
+  demo = { from: angle.x, to, start: performance.now() + 450 };       // let it open first
+  lastPick = performance.now() + DEMO_MS + 2500;                      // don't let updates turn it meanwhile
+  setOpen(true);
+  clearTimeout(idleTimer);
+  clearTimeout(demoTimer);
+  showMessage();
+  kick();
+}
+
+function rollDemo(now) {
+  const p = Math.max(0, Math.min(1, (now - demo.start) / DEMO_MS));
+  const e = 1 - Math.pow(1 - p, 4);   // quick at first, then slows right down onto the slice
+  angle.x = angle.t = demo.from + (demo.to - demo.from) * e;
+  angle.v = 0;
+  if (p >= 1) {
+    demo = null;
+    hubPop.v += 10;
+    demoTimer = setTimeout(() => { setOpen(false); showMessage(); }, 1700);
+  }
+}
+
+function stopDemo() {
+  if (!demo && !demoTimer) return;
+  demo = null;
+  clearTimeout(demoTimer);
+  demoTimer = 0;
+  angle.t = Math.round(angle.x / span) * span;
+}
+
 function picked() {
   lastPick = performance.now();
   const i = sliceAt(angle.t);
@@ -250,6 +308,7 @@ function setOpen(v) {
   scale.t = v ? 1 : SMALL;
   clearTimeout(idleTimer);
   if (v) idleTimer = setTimeout(() => setOpen(false), 5000);
+  if (state) showMessage();
   kick();
 }
 
@@ -266,9 +325,13 @@ wheel.addEventListener("pointerdown", (e) => {
   e.stopPropagation();
   goFullscreen();
   try { wheel.setPointerCapture(e.pointerId); } catch {}
+  stopDemo();
   angle.t = angle.x;
   angle.v = 0;
-  drag = { prev: pointerAngle(e), t: performance.now(), v: 0, x: e.clientX, y: e.clientY, real: false };
+  // Started on the small wheel: it grows as you drag, so follow the finger sideways (its centre
+  // moves while it grows). On the open wheel, follow the finger round the ring.
+  drag = { prev: pointerAngle(e), t: performance.now(), v: 0, x: e.clientX, y: e.clientY, lastX: e.clientX,
+           real: false, sideways: !open };
   hubPop.t = 0.9;
   scale.t = (open ? 1 : SMALL) * 0.94;   // squish under the finger
   clearTimeout(idleTimer);
@@ -280,14 +343,25 @@ wheel.addEventListener("pointermove", (e) => {
   const [cx, cy, radius] = center();
   if (Math.hypot(e.clientX - drag.x, e.clientY - drag.y) > 6 && !drag.real) {
     drag.real = true;
-    scale.t = (open ? 1 : SMALL) * 1.05;   // lifts a little while it spins
+    open = true;                // dragging the small wheel opens it, so you can see what you're turning
+    clearTimeout(idleTimer);
+    scale.t = 1.05;             // lifts a little while it spins
+    showMessage();
   }
-  if (Math.hypot(e.clientX - cx, e.clientY - cy) < radius * 0.15) return;   // too close to the middle to tell direction
-  const g = pointerAngle(e);
-  let d = g - drag.prev;
-  if (d > 180) d -= 360;
-  if (d < -180) d += 360;
-  drag.prev = g;
+  let d;
+  if (drag.sideways) {
+    // Moving the finger right turns the top of the wheel right, like dragging a dial
+    const ring = Math.max(40, (size * 92 / 260) * scale.x);
+    d = ((e.clientX - drag.lastX) / ring) * (180 / Math.PI);
+    drag.lastX = e.clientX;
+  } else {
+    if (Math.hypot(e.clientX - cx, e.clientY - cy) < radius * 0.15) return;   // too close to the middle to tell direction
+    const g = pointerAngle(e);
+    d = g - drag.prev;
+    if (d > 180) d -= 360;
+    if (d < -180) d += 360;
+    drag.prev = g;
+  }
   const now = performance.now();
   drag.v = drag.v * 0.6 + ((d / Math.max(1, now - drag.t)) * 1000) * 0.4;
   drag.t = now;
@@ -448,10 +522,10 @@ document.addEventListener("pointermove", () => {
 // across to put the filter on. A tap anywhere tells main.py to start (tapping a filter starts with
 // that one); main.py brings this screen back once nobody has been in view for 5 seconds.
 const REST = {
-  emoji: { color: "#E9A23B", tint: "#F1DDB6", what: "Your whole head turns into an emoji, and you get a new one every few seconds." },
-  sharingan: { color: "#B8433A", tint: "#EBCFC6", what: "The Sharingan from Naruto. Red eyes, spinning tomoe, full Uchiha." },
-  helmet: { color: "#3A6EA5", tint: "#D3DDE8", what: "Your own space helmet. The visor's clear, so it's still you inside." },
-  clown: { color: "#4C8C5A", tint: "#D3E1CF", what: "A big red nose that stays put, however much you wiggle." },
+  emoji: { label: "Emoji", by: "Viraj", color: "#E9A23B", tint: "#F1DDB6", what: "Your whole head turns into an emoji, and you get a new one every few seconds." },
+  sharingan: { label: "Sharingan", by: "Aman", color: "#B8433A", tint: "#EBCFC6", what: "From the anime Naruto." },
+  helmet: { label: "Astronaut Helmet", by: "Ishan", color: "#3A6EA5", tint: "#D3DDE8", what: "Your own space helmet. The visor's clear, so it's still you inside." },
+  clown: { label: "Clown Nose", by: "Aryan", color: "#4C8C5A", tint: "#D3E1CF", what: "A big red nose that stays put, however much you wiggle." },
 };
 const REST_SPARE = [["#7A5BA6", "#DDD3E6"], ["#2F7F7F", "#CFE1DE"], ["#A6623A", "#EBD8C8"]];
 const REST_TAP_GRACE = 2500;      // ms to trust a tap before main.py's next update confirms it
@@ -478,14 +552,15 @@ function buildRest(names) {
     const key = restKey(name);
     const spare = REST_SPARE[i % REST_SPARE.length];
     const r = REST[key] || { color: spare[0], tint: spare[1], what: "Tap to try it on." };
-    return { name: name.replace(/[<>&"]/g, ""), key, ...r };
+    const safe = name.replace(/[<>&"]/g, "");
+    return { name: safe, label: safe, key, ...r };
   });
   $("restStage").innerHTML = restItems.map((f, i) =>
     `<div class="slide" style="--c:${f.color}">${RestArt.picture(f.key, "st" + i, f.color)}<span class="slide-line"></span></div>`).join("");
   $("restRail").innerHTML = restItems.map((f, i) =>
-    `<div class="thumb" role="listitem" data-index="${i}" aria-label="${f.name}: tap to try">
+    `<div class="thumb" role="listitem" data-index="${i}" aria-label="${f.label}${f.by ? " by " + f.by : ""}: tap to try">
       <div class="thumb-frame" style="--c:${f.color}">${RestArt.picture(f.key, "th" + i, f.color)}</div>
-      <p class="thumb-name">${f.name}</p><div class="thumb-bar"></div>
+      <p class="thumb-name">${f.label}</p>${f.by ? `<p class="thumb-by">by ${f.by}</p>` : ""}<div class="thumb-bar"></div>
     </div>`).join("");
   restNames = names.join("|");
   restLit = -1;
@@ -513,7 +588,7 @@ function showRest(i) {
   const cap = $("restCaption");
   cap.classList.add("swap");
   setTimeout(() => {
-    $("restName").textContent = f.name;
+    $("restName").innerHTML = f.by ? `${f.label} <span class="rest-by">by ${f.by}</span>` : f.label;
     $("restWhat").textContent = f.what;
     cap.classList.remove("swap");
   }, prev < 0 ? 0 : 260);
@@ -582,12 +657,12 @@ function updateRest() {
 function startFromRest(index) {
   if (!resting) return;
   restTapAt = performance.now();
-  send("start", index);
-  if (index != null) {
-    lastPick = performance.now();   // the wheel turns to their pick straight away
-    spinTo(index);
-    if (state) state.active = index;
-  }
+  // Tapped somewhere other than a filter: pick one for them at random
+  const picked = index != null ? index : Math.floor(Math.random() * Math.max(1, restItems.length));
+  send("start", picked);
+  lastPick = performance.now();
+  if (state) state.active = picked;
+  demoPending = picked;             // the wheel rolls to it once the privacy note is done
   const rest = $("rest");
   rest.classList.add("leaving");
   resting = false;
@@ -597,7 +672,6 @@ function startFromRest(index) {
   setTimeout(() => {
     document.body.classList.remove("resting");
     rest.classList.remove("on", "leaving");
-    if (index != null) showName();
     updatePrivacy();
   }, 450);
 }

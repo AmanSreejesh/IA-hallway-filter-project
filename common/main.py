@@ -24,7 +24,9 @@ Set it up once with a tape measure: stand with your eyes exactly 30 inches from 
 look at the screen, and press z (or "Set 30-inch distance" in the staff controls).
 
 Dashboard: the camera fills a full-screen web page (common/dashboard/). A small filter wheel sits
-at the bottom: tap it to open it, spin it or tap a slice to pick a filter. The filter only
+at the bottom: drag it (it grows as you do) or tap it open and tap a slice to pick a filter. Right
+after the privacy intro it opens by itself, rolls round and lands on the person's filter, so
+everyone sees it can be turned. The filter only
 changes when someone picks one (USE_ENGAGEMENT turns on automatic switching, off by default).
 
 Resting screen: while nobody's using it, the page shows the four filters on illustrated faces and

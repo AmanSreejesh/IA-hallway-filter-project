@@ -37,7 +37,11 @@ While nobody is using the display it shows a resting screen: the school time, "H
 filter?", and the four filters taking turns in a big frame. Nothing starts until someone taps the
 screen (tapping one of the filters starts with that one). Then the privacy intro and filters work as
 below. Once nobody has been in view for 5 seconds (`RESTING_AFTER_SECONDS`) the resting screen
-comes back. `USE_RESTING_SCREEN = False` in `common/main.py` turns it off. In `--window` mode, click
+comes back. Each filter is shown with who made it: Emoji by Viraj, Sharingan by Aman,
+Astronaut Helmet by Ishan, Clown Nose by Aryan. Tapping somewhere other than a filter picks
+one at random. Right after the privacy intro, the filter wheel opens, rolls round and lands
+on that filter, then shrinks back, so people see they can drag it to switch.
+`USE_RESTING_SCREEN = False` in `common/main.py` turns it off. In `--window` mode, click
 the window or press space to start. The dashboard font is Schibsted Grotesk (SIL Open Font License,
 in `common/dashboard/fonts/`).
 

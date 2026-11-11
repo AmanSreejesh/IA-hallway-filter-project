@@ -85,7 +85,7 @@ ensure_packages()   # installs OpenCV, NumPy, MediaPipe... the first time, if th
 
 import cv2  # noqa: E402
 import numpy as np  # noqa: E402
-import school_clock  # noqa: E402  (the real time from the internet: the Pi's clock can't be trusted)
+import school_clock  # noqa: E402  (the real time, saved at setup: the Pi's clock can't be trusted)
 
 MODEL_PATH = os.path.join(COMMON_DIR, "face_detection_yunet_2023mar.onnx")
 MODEL_URL = ("https://github.com/opencv/opencv_zoo/raw/main/models/"
@@ -116,7 +116,7 @@ USE_MULTI_USER = True     # everyone in view gets a filter (off = only the close
 USE_ENGAGEMENT = False    # switch filters by itself every FILTER_SWITCH_SECONDS. Off: the filter only
                           # changes when someone picks one on the wheel (or presses n)
 USE_SCHEDULE = True       # filters are off from FILTERS_OFF_AT to FILTERS_ON_AT (school time, see
-                          # school_clock.py: internet time in the school's timezone). Set to False
+                          # school_clock.py: the real time saved at setup, in the school's timezone). Set to False
                           # for after-school events like showcases
 USE_HINT_TEXT = True      # "Step up close..." message when nobody is using a filter
 USE_RESTING_SCREEN = True # the resting screen: shows the four filters and asks people to tap the screen.
@@ -195,7 +195,7 @@ def back_to_resting(empty_for: float) -> bool:
 
 def filters_are_off(school_now=None) -> bool:
     """Off from exactly 4:15 pm, overnight, until exactly 7:30 am (7:30 itself is on), by the
-    school's clock: internet time in the school's timezone, not the Pi's own clock."""
+    school's clock (the real time saved at setup, in the school's timezone), not the Pi's clock."""
     school_now = school_clock.now() if school_now is None else school_now
     now = school_now.time()
     return USE_SCHEDULE and (now >= FILTERS_OFF_AT or now < FILTERS_ON_AT)
@@ -1155,7 +1155,7 @@ def main(argv=None):
     tracker = None
     saved = load_calibration()  # "looking forward" calibration, one per tracker
 
-    school_clock.start()      # fetches the real time in the background, then keeps it fresh
+    school_clock.start()      # the time saved at setup; re-checked in the background if the internet's there
     cam = open_camera(args.camera)
     if not cam.running:
         print("Error: Could not open a camera. Check it's plugged in (unplug and replug a USB webcam),\n"
@@ -1316,6 +1316,7 @@ def main(argv=None):
                         # the resting screen's clock shows school time, not the Pi's clock
                         "clock_ms": round(school_clock.now().timestamp() * 1000),
                         "timezone": school_clock.TIMEZONE,
+                        "clock_source": school_clock.source(),   # staff panel: saved at setup, or not
                         "in_use": anyone,   # someone has a filter on right now
                         "intro": None if intro is None else round(intro, 3),   # 0 -> 1 over 3 seconds
                         "dwell": DWELL_SECONDS,

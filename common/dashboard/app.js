@@ -205,6 +205,7 @@ function render() {
   $("firm").classList.toggle("on", state.firm && !state.off);
   $("debug").textContent = `Debug view: ${state.debug ? "on" : "off"}`;
   $("staffInfo").textContent = `${state.tracker}, ${state.fps} frames a second. ${state.zone_note || ""}`;
+  $("staffClock").textContent = state.clock_source ? `Clock: ${state.clock_source}` : "";
   updatePrivacy();
   if (sel < 0) draw();
 }

@@ -658,17 +658,74 @@ class DwellTests(unittest.TestCase):
 
 
 class SchoolClockTests(unittest.TestCase):
-    """The schedule and the resting screen's clock use internet time in the school's timezone,
-    never the Pi's own clock (which can be wrong)."""
+    """The schedule and the resting screen's clock use the real time in the school's timezone,
+    never the Pi's own clock (which can be wrong). The internet is only needed once, at setup."""
 
     def setUp(self):
+        import tempfile
         clock = system.school_clock
-        saved = (clock._base, clock._source, clock._warned)
-        self.addCleanup(lambda: setattr(clock, "_base", saved[0]) or setattr(clock, "_source", saved[1])
-                        or setattr(clock, "_warned", saved[2]))
+        saved = (clock._base, clock._source, clock._warned, clock._loaded)
+        self.addCleanup(lambda: [setattr(clock, k, v) for k, v in
+                                 zip(("_base", "_source", "_warned", "_loaded"), saved)])
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        for name, value in (("SAVED_PATH", folder.name + "/clock.json"), ("BOOT_ID_PATH", folder.name + "/boot_id")):
+            p = patch.object(clock, name, value)
+            p.start()
+            self.addCleanup(p.stop)
+        self.boot_file = folder.name + "/boot_id"
+        self.set_boot("first-power-on")
+        clock._base, clock._source, clock._loaded = None, None, True
         self.quiet = contextlib.redirect_stdout(io.StringIO())
         self.quiet.__enter__()
         self.addCleanup(self.quiet.__exit__, None, None, None)
+
+    def set_boot(self, boot_id):
+        with open(self.boot_file, "w") as f:
+            f.write(boot_id)
+
+    def test_keeps_the_setup_time_offline_while_the_pi_stays_on(self):
+        clock = system.school_clock
+        real = datetime(2026, 11, 5, 21, 10, tzinfo=timezone.utc).timestamp()   # 4:10 pm in New York
+        with patch.object(clock, "_from_ntp", return_value=(real, 1000.0)), \
+                patch.object(clock.time, "monotonic", return_value=1000.0), \
+                patch.object(clock.time, "time", return_value=real + 5 * 86400):   # the Pi's clock is days out
+            self.assertTrue(clock.sync())                                       # setup, with internet
+        # main.py is closed and started again later, with no internet: same power-on
+        clock._base, clock._source, clock._loaded = None, None, False
+        with patch.object(clock, "_from_ntp", side_effect=AssertionError("used the internet")), \
+                patch.object(clock, "_from_web", side_effect=AssertionError("used the internet")), \
+                patch.object(clock.time, "monotonic", return_value=1000.0 + 300), \
+                patch.object(clock.time, "time", return_value=0.0):             # Pi clock now nonsense
+            t = clock.now()
+            self.assertEqual((t.hour, t.minute), (16, 15))
+            self.assertTrue(system.filters_are_off())
+        self.assertIn("saved", clock.source())
+
+    def test_after_a_restart_carries_the_saved_correction_over(self):
+        clock = system.school_clock
+        real = datetime(2026, 11, 5, 12, 0, tzinfo=timezone.utc).timestamp()    # 7:00 am in New York
+        pi_wrong_by = -3 * 3600 - 17                                             # Pi clock 3 h 17 s slow
+        with patch.object(clock, "_from_ntp", return_value=(real, 500.0)), \
+                patch.object(clock.time, "monotonic", return_value=500.0), \
+                patch.object(clock.time, "time", return_value=real + pi_wrong_by):
+            clock.sync()
+        self.set_boot("second-power-on")                                         # turned off and on again
+        clock._base, clock._source, clock._loaded = None, None, False
+        later_pi = real + pi_wrong_by + 45 * 60                                  # 45 minutes later, by the Pi
+        with patch.object(clock.time, "monotonic", return_value=20.0), patch.object(clock.time, "time", return_value=later_pi):
+            t = clock.now()
+            self.assertEqual((t.hour, t.minute), (7, 45))
+            self.assertFalse(system.filters_are_off())
+        self.assertIn("restart", clock.source())
+
+    def test_never_set_up_falls_back_to_the_pi_clock_without_waiting_for_the_internet(self):
+        clock = system.school_clock
+        clock._loaded = False
+        pi = datetime(2026, 11, 5, 12, 0, tzinfo=timezone.utc).timestamp()
+        with patch.object(clock.time, "time", return_value=pi):
+            self.assertEqual((clock.now().hour, str(clock.now().tzinfo)), (7, "America/New_York"))
+        self.assertIn("this computer", clock.source())
 
     def test_ignores_a_wrong_pi_clock(self):
         clock = system.school_clock
@@ -704,9 +761,8 @@ class SchoolClockTests(unittest.TestCase):
         web.assert_called()
         self.assertIn("web", clock._source)
 
-    def test_without_internet_uses_the_pi_clock_in_the_school_timezone(self):
+    def test_no_internet_is_not_an_error(self):
         clock = system.school_clock
-        clock._base = None
         with patch.object(clock, "_from_ntp", side_effect=OSError), patch.object(clock, "_from_web", side_effect=OSError):
             self.assertFalse(clock.sync())
         pi = datetime(2026, 11, 5, 12, 0, tzinfo=timezone.utc).timestamp()

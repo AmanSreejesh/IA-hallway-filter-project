@@ -49,12 +49,25 @@ is 0.1 at 30 inches, increasing with proximity to 1 at 25 inches. Head angles up
 the angle limit clears activation immediately. Re-entering applies the distance fade immediately.
 Head movement alone does not revoke activation. Filters turn off immediately at
 4:15 p.m. school time (Eastern), including for existing users, and become available
-again at 7:30 a.m. School time comes from the internet, not the display computer's
-clock (the Pi's clock can be wrong): `common/school_clock.py` asks internet time
-servers, or reads a web page's date stamp if those are blocked, converts it to
-`America/New_York` (daylight saving included) and re-checks every 30 minutes. The
-resting screen's clock uses the same time. Without internet it falls back to the
-computer's clock and says so in the terminal. Change `TIMEZONE` there if the display moves.
+again at 7:30 a.m. School time doesn't come from the display computer's clock (the
+Pi's clock can be wrong), and the Pi only needs internet once, during setup:
+
+```sh
+python common/school_clock.py
+```
+
+That gets the real time from internet time servers (or a web page's date stamp if
+those are blocked) and saves it to `common/clock.json`. After that the Pi can stay
+offline: it keeps counting from the saved time with its time-since-boot counter,
+including when the program is restarted. After the Pi itself is turned off and on,
+it carries the saved correction over to the Pi's clock, which is right if the Pi's
+clock kept counting while off (a Pi 5 with its clock battery does). If the time is
+wrong after a power cut, connect the internet for a minute; it re-checks by itself
+whenever a connection is there. Times are in `America/New_York`, daylight saving
+included (change `TIMEZONE` in `common/school_clock.py` if the display moves). The
+resting screen's clock uses the same time, and the staff panel shows where it came from.
+Setup with internet also installs the packages and downloads the face models; none of
+that needs the internet again.
 
 Removing the waiting period supersedes the earlier requirement that visits under
 three seconds never show a filter. Brief visitors can receive an effect while
